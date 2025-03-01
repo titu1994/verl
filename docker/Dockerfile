@@ -1,12 +1,19 @@
+# Build instructions
+# DOCKER_BUILDKIT=1 docker build . -f Dockerfile --progress=plain -t gitlab-master.nvidia.com/smajumdar/verl:0.2.0
+
+# docker push gitlab-master.nvidia.com/smajumdar/verl:0.2.0
+
 # FROM verlai/verl:vemlp-th2.4.0-cu124-vllm0.6.3-ray2.10-te1.7-v0.0.3
 FROM verlai/verl:ngc-th2.4.0-cu124-vllm0.6.3-te1.7-v0.0.4
 
 # Set working directory
-WORKDIR /workspace
+WORKDIR /opt
 
 # Install verl
+ENV VERL_COMMIT=main
 RUN git clone https://github.com/titu1994/verl.git && \
     cd verl && \
+    git checkout $VERL_COMMIT && \
     pip3 install --no-cache-dir -e .
 
 # Install vllm flash-attn
@@ -15,6 +22,7 @@ RUN pip3 install --no-cache-dir vllm>=0.7.0
 RUN MAX_JOBS=4 NINJA_FLAGS="-j4" pip3 install --no-cache-dir --no-build-isolation flash-attn
 RUN pip3 install -U pynvml
 
+WORKDIR /workspace
 
 COPY entrypoint.sh /app/entrypoint.sh
 RUN apt-get update && \
