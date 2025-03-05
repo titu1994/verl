@@ -102,9 +102,10 @@ class BatchedRewardManager:
 def judge_compute_score(data_sources, solution_strs, ground_truths, extra_infos=None):
     from nemo_skills.training.openrlhf.math_reward import reward_func
     prompt_metadata = []
-    for ground_truth in ground_truths:
+    print('entered judge compute score')
+    for ground_truth, extra_info, in zip(ground_truths, extra_infos):
         prompt_metadata.append({
-            "problem": "",
+            "problem": extra_info['problem'],
             "expected_answer": ground_truth,
         })
     return reward_func(solution_strs, None, prompt_metadata)
