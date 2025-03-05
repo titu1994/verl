@@ -650,7 +650,6 @@ class RayPPOTrainer(object):
             test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
             # unpad
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size*self.config.actor_rollout_ref.rollout.n_val)
-            print('validation generation end')
 
             # Store generated outputs
             output_ids = test_output_gen_batch.batch['responses']
