@@ -363,9 +363,8 @@ class RayPPOTrainer(object):
 
         # assert torch.cuda.is_available(), 'cuda must be available on driver'
         self.timeout = TimeoutChecker(
-            initial_interval_hours=config.trainer.get('timeout_hours', 4),
-            backoff_minutes=config.trainer.get('timeout_backoff_minutes', 15),
-            )
+            timeout=config.trainer.get('timeout', '00:03:45:00') # three hours and 45 minutes
+        )
         self.tokenizer = tokenizer
         self.config = config
         self.reward_fn = reward_fn
