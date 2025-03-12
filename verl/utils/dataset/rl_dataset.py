@@ -103,7 +103,12 @@ class RLHFDataset(Dataset):
         dataframes = []
         for parquet_file in self.parquet_files:
             # read parquet files and cache
-            dataframe = pd.read_parquet(parquet_file)
+            if parquet_file.endswith('.parquet'):
+                dataframe = pd.read_parquet(parquet_file)
+            elif parquet_file.endswith('.jsonl'):
+                dataframe = pd.read_json(parquet_file, lines=True)
+            else:
+                raise ValueError(f'Unsupported file type: {parquet_file}')
             dataframes.append(dataframe)
         self.dataframe = pd.concat(dataframes)
 

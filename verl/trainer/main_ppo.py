@@ -118,17 +118,37 @@ def main(config):
         compute_score_fn = None
     run_ppo(config, compute_score_fn)
 
+@hydra.main(config_path='config', config_name='ppo_trainer', version_base=None)
+def main(config):
+    remote_rm_url = config.reward_model.get('reward_manager', None)
+    compute_score = config.reward_model.get('compute_score', None)
+    if (remote_rm_url is not None) and (remote_rm_url.endswith('.py')):
+        print(f"Loading custom `reward_func(queries, prompts)` from {remote_rm_url}")
+        import importlib.util
+        import inspect
 
-def run_ppo(config, compute_score=None):
+        spec = importlib.util.spec_from_file_location("reward_manager_module", remote_rm_url)
+        reward_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(reward_module)
+        reward_manager = reward_module.RewardManager
+    elif compute_score == 'math-judge':
+        compute_score_fn = judge_compute_score
+    else:
+        reward_manager = None
+        compute_score_fn = None
+    run_ppo(config, reward_manager=reward_manager, compute_score=compute_score_fn)
+
+
+def run_ppo(config, reward_manager=None, compute_score=None):
     if not ray.is_initialized():
         # this is for local ray cluster
         ray.init(runtime_env={'env_vars': {'TOKENIZERS_PARALLELISM': 'true', 'NCCL_DEBUG': 'WARN'}})
 
-    ray.get(main_task.remote(config, compute_score))
+    ray.get(main_task.remote(config, reward_manager=None, compute_score=None))
 
 
 @ray.remote(num_cpus=1)  # please make sure main_task is not scheduled on head
-def main_task(config, compute_score=None):
+def main_task(config, reward_manager=None, compute_score=None):
     from verl.utils.fs import copy_to_local
     # print initial config
     from pprint import pprint
@@ -194,7 +214,9 @@ def main_task(config, compute_score=None):
         mapping[Role.RewardModel] = global_pool_id
 
     reward_manager_name = config.reward_model.get("reward_manager", "naive")
-    if reward_manager_name == 'naive':
+    if reward_manager is not None:
+        reward_manager_cls = reward_manager
+    elif reward_manager_name == 'naive':
         from verl.workers.reward_manager import NaiveRewardManager
         reward_manager_cls = NaiveRewardManager
     elif reward_manager_name == 'prime':
