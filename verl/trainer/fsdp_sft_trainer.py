@@ -443,11 +443,13 @@ class FSDPSFTTrainer(object):
 
     def fit(self):
         rank = self.device_mesh.get_rank()
+        wandb_id = self.config.trainer.get('id', None)
 
         # TODO: add a unified tracking
         if rank == 0:
             tracking = Tracking(project_name=self.config.trainer.project_name,
                                 experiment_name=self.config.trainer.experiment_name,
+                                wandb_id=wandb_id,
                                 default_backend=self.config.trainer.logger)
 
         global_step = 0
