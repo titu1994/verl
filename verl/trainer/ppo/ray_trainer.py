@@ -894,9 +894,12 @@ class RayPPOTrainer(object):
         from verl.utils.tracking import Tracking
         from omegaconf import OmegaConf
 
+        wandb_id = self.config.trainer.get('id', None)
+
         logger = Tracking(project_name=self.config.trainer.project_name,
                           experiment_name=self.config.trainer.experiment_name,
                           default_backend=self.config.trainer.logger,
+                          wandb_id=wandb_id,
                           config=OmegaConf.to_container(self.config, resolve=True))
 
         self.global_steps = 0
