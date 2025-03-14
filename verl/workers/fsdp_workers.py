@@ -452,6 +452,13 @@ class ActorRolloutRefWorker(Worker):
         torch.cuda.empty_cache()
         return output
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def sharding_manager_preprocess(self, prompts: DataProto):
+        prompts = prompts.to('cuda')
+        prompts.batch = prompts.batch.cuda()
+        # TODO: do we need a context manager?
+        return self.rollout_sharding_manager.preprocess_data(prompts)
+
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def generate_sequences(self, prompts: DataProto):
         prompts = prompts.to('cuda')
@@ -480,7 +487,8 @@ class ActorRolloutRefWorker(Worker):
 
             log_gpu_memory_usage('After entering rollout sharding manager', logger=logger)
 
-            prompts = self.rollout_sharding_manager.preprocess_data(prompts)
+            # NOTE: this is now done inside ray_trainer.py (to allow for fewer prompts to be used)
+            # prompts = self.rollout_sharding_manager.preprocess_data(prompts)
             output = self.rollout.generate_sequences(prompts=prompts)
 
             log_gpu_memory_usage('After rollout generation', logger=logger)

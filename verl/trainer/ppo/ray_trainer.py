@@ -932,6 +932,15 @@ class RayPPOTrainer(object):
                 with _timer('step', timing_raw):
                     # generate a batch
                     with _timer('gen', timing_raw):
+                        # NOTE: this is very hacky, but doing this to work around the prompts >= num gpus restriction
+                        #       this is supposed to just duplicate all prompts TP times since that's what
+                        #       is done anyway in fsdp_workers.generate_sequences.
+                        #       Just doing it here since it will be chunked by dp size * tp size when generate_sequences
+                        #       is called below.
+                        gen_batch = self.actor_rollout_wg.sharding_manager_preprocess(gen_batch)
+                        # will have duplicate info, only taking the first one
+                        gen_batch = gen_batch[0]
+
                         gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
