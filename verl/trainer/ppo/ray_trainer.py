@@ -18,6 +18,7 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import os
 import uuid
+import copy
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
@@ -38,6 +39,7 @@ from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seql
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
 from verl.utils.timer import TimeoutChecker
+from verl.protocol import TensorDict
 from torch.utils.data import RandomSampler, SequentialSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 
@@ -932,7 +934,50 @@ class RayPPOTrainer(object):
                 with _timer('step', timing_raw):
                     # generate a batch
                     with _timer('gen', timing_raw):
-                        gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                        # NOTE: this is very hacky, but doing this to work around the prompts >= num gpus restriction
+                        #       this is supposed to just duplicate all prompts TP times since that's what
+                        #       is done anyway in fsdp_workers.generate_sequences.
+                        #       Just doing it here since it will be chunked by dp size * tp size when generate_sequences
+                        #       is called below.
+                        orig_gen_batch = gen_batch
+
+                        tp_size = self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
+                        # Create a new DataProto
+                        extended_gen_batch = DataProto()
+
+                        batch_as_dict = gen_batch.batch.to_dict()
+                        original_batch_size = gen_batch.batch.batch_size[0]
+
+                        # Process the tensors
+                        output_dict = {}
+                        for key, tensor in batch_as_dict.items():
+                            output_dict[key] = torch.cat([tensor] * tp_size, dim=0)
+
+                        # Convert back to TensorDict if original was TensorDict
+                        extended_gen_batch.batch = TensorDict(source=output_dict, batch_size=original_batch_size * tp_size)
+
+                        # Copy meta_info
+                        extended_gen_batch.meta_info = copy.deepcopy(gen_batch.meta_info)
+
+                        # Duplicate non-tensor batch data
+                        for key, value in gen_batch.non_tensor_batch.items():
+                            if isinstance(value, np.ndarray):
+                                extended_gen_batch.non_tensor_batch[key] = np.tile(value, tp_size)
+                            elif isinstance(value, list):
+                                extended_gen_batch.non_tensor_batch[key] = value * tp_size
+                            else:
+                                assert False, "don't know how to duplicate this data"
+
+                        gen_batch_output = self.actor_rollout_wg.generate_sequences(extended_gen_batch)
+
+                        # double checking that there is no corruption
+                        # TODO: remove after we are confident everything works in all settings
+                        for idx in range(orig_gen_batch.batch.batch_size[0]):
+                            assert torch.allclose(
+                                orig_gen_batch.batch['input_ids'][idx],
+                                # the layout should be prompt1, prompt1, ..., prompt2, prompt2, ...
+                                gen_batch_output.batch['prompts'][idx * self.config.actor_rollout_ref.rollout.n],
+                            )
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with _timer('gen_max', timing_raw):
