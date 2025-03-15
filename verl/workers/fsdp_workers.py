@@ -455,6 +455,7 @@ class ActorRolloutRefWorker(Worker):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def generate_sequences(self, prompts: DataProto):
         prompts = prompts.to('cuda')
+        print("Got into generation", prompts)
 
         assert self._is_rollout
         if self._is_offload_param:

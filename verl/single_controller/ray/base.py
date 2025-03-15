@@ -344,8 +344,10 @@ class RayWorkerGroup(WorkerGroup):
                 for i in range(length):
                     sliced_args = tuple(arg[i] for arg in args)
                     sliced_kwargs = {k: v[i] for k, v in kwargs.items()}
+                    print(f"execute_all_async: method {method_name}({sliced_args}, {sliced_kwargs})")
                     remote_call = getattr(self._workers[i], method_name)
                     result.append(remote_call.remote(*sliced_args, **sliced_kwargs))
+                    print("done remote call", result[-1])
                 return result
 
         return [getattr(worker, method_name).remote(*args, **kwargs) for worker in self._workers]
@@ -368,7 +370,7 @@ class RayWorkerGroup(WorkerGroup):
 
 
 """
-Utilities that enables creating workers inside the same ray.Actor, 
+Utilities that enables creating workers inside the same ray.Actor,
 with code written in separate ray.Actors.
 """
 
@@ -379,7 +381,7 @@ import os
 
 def _bind_workers_method_to_parent(cls, key, user_defined_cls):
     """
-    Binds the methods of each worker to the WorkerDict. 
+    Binds the methods of each worker to the WorkerDict.
     Note that we only bind public methods that are decorated by register
     """
     for method_name in dir(user_defined_cls):
@@ -419,7 +421,7 @@ def _unwrap_ray_remote(cls):
 
 def create_colocated_worker_cls(class_dict: dict[str, RayClassWithInitArgs]):
     """
-    This function should return a class instance that delegates the calls to every 
+    This function should return a class instance that delegates the calls to every
     cls in cls_dict
     """
     cls_dict = {}

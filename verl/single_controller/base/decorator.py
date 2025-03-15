@@ -47,6 +47,7 @@ def _split_args_kwargs_data_proto(chunks, *args, **kwargs):
     splitted_args = []
     for arg in args:
         assert isinstance(arg, (DataProto, DataProtoFuture))
+        print("SPLITTING", arg, chunks)
         splitted_args.append(arg.chunk(chunks=chunks))
 
     splitted_kwargs = {}

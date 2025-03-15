@@ -967,7 +967,7 @@ class RayPPOTrainer(object):
                                 extended_gen_batch.non_tensor_batch[key] = value * tp_size
                             else:
                                 assert False, "don't know how to duplicate this data"
-
+                        print("!!", extended_gen_batch)
                         gen_batch_output = self.actor_rollout_wg.generate_sequences(extended_gen_batch)
 
                         # double checking that there is no corruption
