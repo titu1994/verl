@@ -940,7 +940,7 @@ class RayPPOTrainer(object):
                         #       Just doing it here since it will be chunked by dp size * tp size when generate_sequences
                         #       is called below.
                         orig_gen_batch = gen_batch
-
+                        print("orignial gen_batch", gen_batch)
                         tp_size = self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
                         # Create a new DataProto
                         extended_gen_batch = DataProto()
@@ -969,7 +969,7 @@ class RayPPOTrainer(object):
                                 assert False, "don't know how to duplicate this data"
                         print("!!", extended_gen_batch)
                         gen_batch_output = self.actor_rollout_wg.generate_sequences(extended_gen_batch)
-
+                        print("done generation", gen_batch_output)
                         # double checking that there is no corruption
                         # TODO: remove after we are confident everything works in all settings
                         for idx in range(orig_gen_batch.batch.batch_size[0]):
@@ -1003,7 +1003,9 @@ class RayPPOTrainer(object):
                     batch.non_tensor_batch['sample_uid'] = np.array(
                         [str(uuid.uuid4()) for _ in range(len(batch.batch))],
                         dtype=object)
-
+                    print("after merging meta info", batch)
+                    print(batch.batch['input_ids'][-80:])
+                    print(batch.meta_info)
                     # balance the number of valid tokens on each dp rank.
                     # Note that this breaks the order of data inside the batch.
                     # Please take care when you implement group based adv computation such as GRPO and rloo
