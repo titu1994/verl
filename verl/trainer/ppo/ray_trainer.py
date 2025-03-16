@@ -573,10 +573,17 @@ class RayPPOTrainer(object):
         if not hasattr(self, 'training_table'):
             self.training_table = wandb.Table(columns=columns)
 
-        for inp, outp, rew in zip(inputs, outputs, rewards):
-            self.training_table.add_data(self.global_steps, inp, outp, rew)
+        new_table = wandb.Table(columns=columns, data=self.training_table.data)
 
-        wandb.log({"train/generations": self.training_table}, step=self.global_steps)
+        row_data = []
+        row_data.append(self.global_steps)
+        for inp, outp, rew in zip(inputs, outputs, rewards):
+            row_data.extend([inp, outp, rew])
+        
+        new_table.add_data(*row_data)
+
+        wandb.log({"train/generations": new_table}, step=self.global_steps)
+        self.training_table = new_table
 
     def _maybe_log_val_generations_to_wandb(self, inputs, outputs, scores):
         """Log a table of validation samples to wandb"""
