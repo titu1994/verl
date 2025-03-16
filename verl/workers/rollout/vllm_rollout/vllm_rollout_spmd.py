@@ -153,6 +153,7 @@ class vLLMRollout(BaseRollout):
             self.inference_engine.init_cache_engine()
 
         idx = prompts.batch['input_ids']  # (bs, prompt_length)
+        print(idx[:32, -80:])
         # left-padded attention_mask
         attention_mask = prompts.batch['attention_mask']
         position_ids = prompts.batch['position_ids']

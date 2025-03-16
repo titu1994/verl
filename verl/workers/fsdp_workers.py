@@ -472,6 +472,8 @@ class ActorRolloutRefWorker(Worker):
         }
         prompts.meta_info.update(meta_info)
         with self.rollout_sharding_manager:
+            from verl.third_party.vllm import parallel_state as vllm_ps
+            print("######", vllm_ps.get_tensor_model_parallel_world_size(), vllm_ps.get_tensor_model_parallel_group().device_group)
 
             # after parameters sync with rollout, offload actor model to CPU
             if self._is_offload_param:
@@ -482,7 +484,7 @@ class ActorRolloutRefWorker(Worker):
             log_gpu_memory_usage('After entering rollout sharding manager', logger=logger)
 
             # NOTE this is now done through direct prompt duplication in ray_trainer.py
-            # prompts = self.rollout_sharding_manager.preprocess_data(prompts)
+            prompts = self.rollout_sharding_manager.preprocess_data(prompts)
             output = self.rollout.generate_sequences(prompts=prompts)
 
             log_gpu_memory_usage('After rollout generation', logger=logger)
