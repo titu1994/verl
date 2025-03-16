@@ -575,12 +575,8 @@ class RayPPOTrainer(object):
 
         new_table = wandb.Table(columns=columns, data=self.training_table.data)
 
-        row_data = []
-        row_data.append(self.global_steps)
         for inp, outp, rew in zip(inputs, outputs, rewards):
-            row_data.extend([inp, outp, rew])
-        
-        new_table.add_data(*row_data)
+            new_table.add_data(self.global_steps, inp, outp, rew)
 
         wandb.log({"train/generations": new_table}, step=self.global_steps)
         self.training_table = new_table
