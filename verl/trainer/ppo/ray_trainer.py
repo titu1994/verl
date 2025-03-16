@@ -957,13 +957,7 @@ class RayPPOTrainer(object):
                         self.tokenizer.decode(ids, skip_special_tokens=True)
                         for ids in gen_batch_output.batch['responses']
                     ]
-                    # Get total reward per sample
-                    total_rewards = batch.batch['token_level_rewards'].sum(-1).cpu().tolist()
-                    self._maybe_log_train_generations_to_wandb(
-                            inputs=input_texts,
-                            outputs=output_texts,
-                            rewards=total_rewards
-                        )
+
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with _timer('gen_max', timing_raw):
                             gen_baseline_batch = deepcopy(gen_batch)
@@ -1048,7 +1042,13 @@ class RayPPOTrainer(object):
                                                   lam=self.config.algorithm.lam,
                                                   num_repeat=self.config.actor_rollout_ref.rollout.n,
                                                   normalize=self.config.algorithm.normalize_advantage)
-
+                                                            # Get total reward per sample
+                    total_rewards = batch.batch['token_level_rewards'].sum(-1).cpu().tolist()
+                    self._maybe_log_train_generations_to_wandb(
+                            inputs=input_texts,
+                            outputs=output_texts,
+                            rewards=total_rewards
+                        )
                     # update critic
                     if self.use_critic:
                         with _timer('update_critic', timing_raw):
