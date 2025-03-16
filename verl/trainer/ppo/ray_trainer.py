@@ -1015,17 +1015,17 @@ class RayPPOTrainer(object):
 
                         print("!!", extended_gen_batch)
                         print(extended_gen_batch.batch['input_ids'][:32, -80:])
-                        gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                        gen_batch_output = self.actor_rollout_wg.generate_sequences(extended_gen_batch)
                         print("done generation", gen_batch_output)
                         print(gen_batch_output.batch['prompts'][:32, -80:])
                         # double checking that there is no corruption
                         # TODO: remove after we are confident everything works in all settings
-                        # for idx in range(orig_gen_batch.batch.batch_size[0]):
-                        #     assert torch.allclose(
-                        #         orig_gen_batch.batch['input_ids'][idx],
-                        #         # the layout should be prompt1, prompt1, ..., prompt2, prompt2, ...
-                        #         gen_batch_output.batch['prompts'][idx * self.config.actor_rollout_ref.rollout.n],
-                        #     )
+                        for idx in range(orig_gen_batch.batch.batch_size[0]):
+                            assert torch.allclose(
+                                orig_gen_batch.batch['input_ids'][idx],
+                                # the layout should be prompt1, prompt1, ..., prompt2, prompt2, ...
+                                gen_batch_output.batch['prompts'][idx * self.config.actor_rollout_ref.rollout.n],
+                            )
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with _timer('gen_max', timing_raw):
