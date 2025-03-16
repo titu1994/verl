@@ -562,6 +562,22 @@ class RayPPOTrainer(object):
             self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
             self.config.critic.optim.total_training_steps = total_training_steps
 
+    def _maybe_log_train_generations_to_wandb(self, inputs, outputs, rewards):
+        """Log a table of training samples to wandb."""
+        # Only log if wandb is used
+        if 'wandb' not in self.config.trainer.logger:
+            return
+
+        import wandb
+        columns = ["step", "input", "output", "reward"]
+        if not hasattr(self, 'training_table'):
+            self.training_table = wandb.Table(columns=columns)
+
+        for inp, outp, rew in zip(inputs, outputs, rewards):
+            self.training_table.add_data(self.global_steps, inp, outp, rew)
+
+        wandb.log({"train/generations": self.training_table}, step=self.global_steps)
+
     def _maybe_log_val_generations_to_wandb(self, inputs, outputs, scores):
         """Log a table of validation samples to wandb"""
 
@@ -933,7 +949,21 @@ class RayPPOTrainer(object):
                     # generate a batch
                     with _timer('gen', timing_raw):
                         gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-
+                    input_texts = [
+                        self.tokenizer.decode(ids, skip_special_tokens=True)
+                        for ids in gen_batch.batch['input_ids']
+                    ]
+                    output_texts = [
+                        self.tokenizer.decode(ids, skip_special_tokens=True)
+                        for ids in gen_batch_output.batch['responses']
+                    ]
+                    # Get total reward per sample
+                    total_rewards = batch.batch['token_level_rewards'].sum(-1).cpu().tolist()
+                    self._maybe_log_train_generations_to_wandb(
+                            inputs=input_texts,
+                            outputs=output_texts,
+                            rewards=total_rewards
+                        )
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with _timer('gen_max', timing_raw):
                             gen_baseline_batch = deepcopy(gen_batch)
