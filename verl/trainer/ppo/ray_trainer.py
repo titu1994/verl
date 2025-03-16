@@ -939,16 +939,15 @@ class RayPPOTrainer(object):
                         #       Just doing it here since it will be chunked by dp size * tp size when generate_sequences
                         #       is called below.
                         orig_gen_batch = gen_batch
-                        print(f'Original batch: {orig_gen_batch.batch} {orig_gen_batch.batch["input_ids"][:32][-80:]}')
                         tp_size = self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
                         extended_gen_batch = DataProto()
 
                         batch_as_dict = gen_batch.batch.to_dict()
                         original_batch_size = gen_batch.batch.batch_size[0]
 
-                        num_gpus = self.actor_rollout_wg.world_size  # 8
-                        real_dp = num_gpus // tp_size  # 2
-                        prompts_per_tp_group = original_batch_size // real_dp  # 1
+                        num_gpus = self.actor_rollout_wg.world_size
+                        real_dp = num_gpus // tp_size
+                        prompts_per_tp_group = original_batch_size // real_dp
                         assert prompts_per_tp_group > 0
 
                         output_dict = {}
@@ -967,7 +966,6 @@ class RayPPOTrainer(object):
                         extended_gen_batch.batch = TensorDict(
                             source=output_dict, batch_size=original_batch_size * tp_size
                         )
-                        print(f'Extended batch: {extended_gen_batch.batch} {extended_gen_batch.batch['input_ids'][:32][-80:]}')
                         gen_batch_output = self.actor_rollout_wg.generate_sequences(extended_gen_batch)
                         # double checking that there is no corruption
                         # TODO: remove after we are confident everything works in all settings
