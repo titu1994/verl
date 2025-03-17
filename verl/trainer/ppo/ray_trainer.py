@@ -567,6 +567,13 @@ class RayPPOTrainer(object):
         # Only log if wandb is used
         if 'wandb' not in self.config.trainer.logger:
             return
+        if hasattr(self.config.trainer, 'train_generations_to_log_to_wandb'):
+            generations_to_log = self.config.trainer.train_generations_to_log_to_wandb
+        else:
+            generations_to_log = -1
+
+        if generations_to_log == 0:
+            return
 
         import wandb
         columns = ["step", "input", "output", "reward"]
@@ -574,7 +581,9 @@ class RayPPOTrainer(object):
             self.training_table = wandb.Table(columns=columns)
 
         new_table = wandb.Table(columns=columns, data=self.training_table.data)
-
+        inputs = inputs[:generations_to_log]
+        outputs = outputs[:generations_to_log]
+        rewards = rewards[:generations_to_log]
         for inp, outp, rew in zip(inputs, outputs, rewards):
             new_table.add_data(self.global_steps, inp, outp, rew)
 
