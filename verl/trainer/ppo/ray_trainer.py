@@ -564,6 +564,11 @@ class RayPPOTrainer(object):
 
     def _maybe_log_train_generations_to_wandb(self, inputs, outputs, rewards):
         """Log a table of training samples to wandb."""
+
+        # If train_generations_to_log_to_wandb is > 0, log a table of training samples to wandb
+        # If it's 0, don't log anything
+        # If it's -1, log all samples
+        # If it's a positive number, log that many samples
         if hasattr(self.config.trainer, 'train_generations_to_log_to_wandb'):
             generations_to_log = self.config.trainer.train_generations_to_log_to_wandb
         else:
