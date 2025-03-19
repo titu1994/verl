@@ -304,11 +304,11 @@ def compute_data_metrics(batch, use_critic=True):
         'response_length/all/min':
             torch.min(response_length).detach().item(),
         'response_length/correct/mean':
-            torch.mean(correct_response_lengths).detach().item(),
+            torch.mean(correct_response_lengths).detach().item() if len(correct_response_lengths) > 0 else 0,
         'response_length/correct/max':
-            torch.max(correct_response_lengths).detach().item(),
+            torch.max(correct_response_lengths).detach().item() if len(correct_response_lengths) > 0 else 0,
         'response_length/correct/min':
-            torch.min(correct_response_lengths).detach().item(),
+            torch.min(correct_response_lengths).detach().item() if len(correct_response_lengths) > 0 else 0,
         'response_length/incorrect/mean':
             torch.mean(incorrect_response_lengths).detach().item() if len(incorrect_response_lengths) > 0 else 0,
         'response_length/incorrect/max':
