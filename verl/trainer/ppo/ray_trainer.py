@@ -1013,7 +1013,7 @@ class RayPPOTrainer(object):
                         extended_gen_batch.batch = TensorDict(
                             source=output_dict, batch_size=original_batch_size * tp_size
                         )
-                        gen_batch_output = self.actor_rollout_wg.generate_sequences(extended_gen_batch)
+                        gen_batch_output = self.actor_rollout_wg.generate_sequences_nopreprocess(extended_gen_batch)
                         # double checking that there is no corruption
                         # TODO: remove after we are confident everything works in all settings
                         for idx in range(orig_gen_batch.batch.batch_size[0]):
