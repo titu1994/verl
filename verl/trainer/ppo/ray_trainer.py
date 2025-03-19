@@ -310,11 +310,11 @@ def compute_data_metrics(batch, use_critic=True):
         'response_length/correct/min':
             torch.min(correct_response_lengths).detach().item(),
         'response_length/incorrect/mean':
-            torch.mean(incorrect_response_lengths).detach().item(),
+            torch.mean(incorrect_response_lengths).detach().item() if len(incorrect_response_lengths) > 0 else 0,
         'response_length/incorrect/max':
-            torch.max(incorrect_response_lengths).detach().item(),
+            torch.max(incorrect_response_lengths).detach().item() if len(incorrect_response_lengths) > 0 else 0,
         'response_length/incorrect/min':
-            torch.min(incorrect_response_lengths).detach().item(),
+            torch.min(incorrect_response_lengths).detach().item() if len(incorrect_response_lengths) > 0 else 0,
         'response_length/clip_ratio':
             torch.mean(torch.eq(response_length, max_response_length).float()).detach().item(),
         # prompt length
