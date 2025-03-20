@@ -600,7 +600,18 @@ class RayPPOTrainer(object):
             self.training_table = wandb.Table(columns=columns)
 
         inputs = [x for x in inputs for _ in range(self.config.actor_rollout_ref.rollout.n)] # repeat for each rollout
-        assert len(inputs) == len(outputs) == len(rewards), f'{len(inputs)=}, {len(outputs)=}, {len(rewards)=}\nFirst 5 inputs: {inputs[:5]}\nFirst 5 outputs: {outputs[:5]}\nFirst 5 rewards: {rewards[:5]}'
+
+        assert len(inputs) == len(outputs) == len(rewards) # Sanity check
+
+        samples = zip(inputs, outputs, rewards)
+        samples = list(samples)
+        samples.sort(key=lambda x: x[0])  # Sort by input text
+
+        # Use fixed random seed for deterministic shuffling
+        rng = np.random.RandomState(42)
+        rng.shuffle(samples)
+
+        inputs, outputs, rewards = zip(*samples)
 
         new_table = wandb.Table(columns=columns, data=self.training_table.data)
         inputs = inputs[:generations_to_log]
