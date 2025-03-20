@@ -607,10 +607,6 @@ class RayPPOTrainer(object):
         samples = list(samples)
         samples.sort(key=lambda x: x[0])  # Sort by input text
 
-        # Use fixed random seed for deterministic shuffling
-        rng = np.random.RandomState(42)
-        rng.shuffle(samples)
-
         inputs, outputs, rewards = zip(*samples)
 
         new_table = wandb.Table(columns=columns, data=self.training_table.data)
