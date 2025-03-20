@@ -109,11 +109,23 @@ def judge_compute_score(data_sources, solution_strs, ground_truths, extra_infos=
         })
     return reward_func(solution_strs, None, prompt_metadata)
 
+def mcq_compute_score(data_sources, solution_strs, ground_truths, extra_infos=None):
+    from nemo_skills.training.openrlhf.mcq_reward import reward_func
+    prompt_metadata = []
+    for ground_truth, extra_info, in zip(ground_truths, extra_infos):
+        prompt_metadata.append({
+            "problem": extra_info['problem'],
+            "expected_answer": ground_truth,
+        })
+    return reward_func(solution_strs, None, prompt_metadata)
+
 @hydra.main(config_path='config', config_name='ppo_trainer', version_base=None)
 def main(config):
     compute_score = config.reward_model.get('compute_score', None)
     if compute_score == 'math-judge':
         compute_score_fn = judge_compute_score
+    elif compute_score == 'mcq-accuracy':
+        compute_score_fn = mcq_compute_score
     else:
         compute_score_fn = None
     run_ppo(config, compute_score_fn)
