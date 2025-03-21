@@ -111,17 +111,9 @@ def judge_compute_score(data_sources, solution_strs, ground_truths, extra_infos=
 
 @hydra.main(config_path='config', config_name='ppo_trainer', version_base=None)
 def main(config):
-    compute_score = config.reward_model.get('compute_score', None)
-    if compute_score == 'math-judge':
-        compute_score_fn = judge_compute_score
-    else:
-        compute_score_fn = None
-    run_ppo(config, compute_score_fn)
-
-@hydra.main(config_path='config', config_name='ppo_trainer', version_base=None)
-def main(config):
     remote_rm_url = config.reward_model.get('reward_manager', None)
     compute_score = config.reward_model.get('compute_score', None)
+    compute_score_fn = None
     if (remote_rm_url is not None) and (remote_rm_url.endswith('.py')):
         print(f"Loading custom `reward_func(queries, prompts)` from {remote_rm_url}")
         import importlib.util
@@ -144,7 +136,7 @@ def run_ppo(config, reward_manager=None, compute_score=None):
         # this is for local ray cluster
         ray.init(runtime_env={'env_vars': {'TOKENIZERS_PARALLELISM': 'true', 'NCCL_DEBUG': 'WARN'}})
 
-    ray.get(main_task.remote(config, reward_manager=None, compute_score=None))
+    ray.get(main_task.remote(config, reward_manager=reward_manager, compute_score=compute_score))
 
 
 @ray.remote(num_cpus=1)  # please make sure main_task is not scheduled on head

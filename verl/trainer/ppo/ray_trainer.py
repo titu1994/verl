@@ -18,6 +18,7 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import os
 import uuid
+import inspect
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
@@ -360,6 +361,15 @@ def _timer(name: str, timing_raw: Dict[str, float]):
         yield
     timing_raw[name] = timer.last
 
+def wrap_reward_fn(reward_fn):
+    params = inspect.signature(reward_fn).parameters
+    def wrapped_reward_fn(batch, **kwargs):
+        keys = kwargs.keys()
+        for key in keys:
+            if key not in params:
+                kwargs.pop(key)
+        return reward_fn(batch, **kwargs)
+    return wrapped_reward_fn
 
 class RayPPOTrainer(object):
     """
@@ -384,8 +394,8 @@ class RayPPOTrainer(object):
         )
         self.tokenizer = tokenizer
         self.config = config
-        self.reward_fn = reward_fn
-        self.val_reward_fn = val_reward_fn
+        self.reward_fn = wrap_reward_fn(reward_fn)
+        self.val_reward_fn = wrap_reward_fn(val_reward_fn)
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, 'Currently, only support hybrid engine'
@@ -520,7 +530,7 @@ class RayPPOTrainer(object):
 
     def _create_dataloader(self):
         # TODO: we have to make sure the batch size is divisible by the dp size
-        self.train_dataset = RLHFDataset(dataset_files=self.config.data.train_files,
+        self.train_dataset = RLHFDataset(parquet_files=self.config.data.train_files,
                                          tokenizer=self.tokenizer,
                                          prompt_key=self.config.data.prompt_key,
                                          max_prompt_length=self.config.data.max_prompt_length,
@@ -710,7 +720,7 @@ class RayPPOTrainer(object):
             test_batch = test_batch.union(test_output_gen_batch)
 
             # evaluate using reward_function
-            reward_tensor = self.val_reward_fn(test_batch)
+            reward_tensor = self.val_reward_fn(test_batch, event='val', config=self.config)
 
             # Store scores
             scores = reward_tensor.sum(-1).cpu().tolist()
@@ -718,9 +728,10 @@ class RayPPOTrainer(object):
 
             reward_tensor_lst.append(reward_tensor)
             data_source = test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0])
-            for idx, x in enumerate(test_batch.non_tensor_batch['extra_info']):
-                if 'name' in x:
-                    data_source[idx] = x['name']
+            if 'extra_info' in test_batch.non_tensor_batch:
+                for idx, x in enumerate(test_batch.non_tensor_batch['extra_info']):
+                    if 'name' in x:
+                        data_source[idx] = x['name']
             data_source_lst.append(data_source)
             data_uid_lst.append(test_batch.non_tensor_batch['uid'])
 
@@ -971,7 +982,7 @@ class RayPPOTrainer(object):
 
         self.timeout.start_iterations()
         for epoch in range(self.config.trainer.total_epochs):
-            for batch_dict in self.train_dataloader:
+            for i_batch, batch_dict in enumerate(self.train_dataloader):
                 metrics = {}
                 timing_raw = {}
 
@@ -1042,7 +1053,7 @@ class RayPPOTrainer(object):
                             gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
 
                             batch = batch.union(gen_baseline_output)
-                            reward_baseline_tensor = self.reward_fn(batch)
+                            reward_baseline_tensor = self.reward_fn(batch, event='remax', epoch=epoch, batch_index=i_batch, config=self.config)
                             reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
 
                             batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
@@ -1051,14 +1062,11 @@ class RayPPOTrainer(object):
 
                             del gen_baseline_batch, gen_baseline_output
 
-                    batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))],
-                                                             dtype=object)
+                    batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
-                    batch.non_tensor_batch['sample_uid'] = np.array(
-                        [str(uuid.uuid4()) for _ in range(len(batch.batch))],
-                        dtype=object)
+                    batch.non_tensor_batch['sample_uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
 
                     # balance the number of valid tokens on each dp rank.
                     # Note that this breaks the order of data inside the batch.
@@ -1100,7 +1108,7 @@ class RayPPOTrainer(object):
                             batch = batch.union(reward_tensor)
 
                         # we combine with rule-based rm
-                        reward_tensor = self.reward_fn(batch)
+                        reward_tensor = self.reward_fn(batch, event='rollout', epoch=epoch, batch_index=i_batch, config=self.config)
                         batch.batch['token_level_scores'] = reward_tensor
 
                         # compute rewards. apply_kl_penalty if available

@@ -17,6 +17,7 @@ import os
 from typing import List, Union
 import copy
 import pandas as pd
+import json
 
 import torch
 import numpy as np
@@ -52,6 +53,25 @@ def collate_fn(data_list: list[dict]) -> dict:
     output.update(tensors)
     output.update(non_tensors)
     return output
+
+
+def read_jsonl_as_dataframe(jsonl_file: str) -> pd.DataFrame:
+    d = {}
+    with open(jsonl_file, 'r') as f:
+        for line in f:
+            line = json.loads(line)
+            for k in line:
+                if k not in d:
+                    d[k] = []
+    with open(jsonl_file, 'r') as f:
+        for line in f:
+            line = json.loads(line)
+            for k in d:
+                if k in line:
+                    d[k].append(line[k])
+                else:
+                    d[k].append(None)
+    return pd.DataFrame(d)
 
 
 class RLHFDataset(Dataset):
