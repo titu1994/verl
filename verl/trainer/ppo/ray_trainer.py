@@ -826,6 +826,7 @@ class RayPPOTrainer(object):
                 var2vals[metric_name].append(metric_vals[sample_idx])
 
         data_src2prompt2var2metric = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
+        print(f'Dict before metric calculation: {data_src2prompt2var2vals}')
         for data_source, prompt2var2vals in data_src2prompt2var2vals.items():
             for prompt, var2vals in prompt2var2vals.items():
                 n_resps = len(var2vals["final_reward"])
