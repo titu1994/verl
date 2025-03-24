@@ -228,7 +228,7 @@ def main_task(config, compute_score=None):
         reward_manager_cls = BatchedRewardManager
     else:
         raise NotImplementedError
-    reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=0, compute_score=compute_score, overlong_buffer_cfg=config.custem_reward_function.overlong_buffer)
+    reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=0, compute_score=compute_score, overlong_buffer_cfg=config.reward_manager.get('overlong_buffer', None))
 
     # Turn off num_examine, context length too long
     if config.trainer.get('run_validation', True):
