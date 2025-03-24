@@ -28,10 +28,15 @@ class BatchedRewardManager:
     """The reward manager.
     """
 
-    def __init__(self, tokenizer, num_examine, compute_score=None) -> None:
+    def __init__(self, tokenizer, num_examine, compute_score=None, overlong_buffer_cfg=None) -> None:
         self.tokenizer = tokenizer
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
         self.compute_score = compute_score or _default_compute_score
+        self.overlong_buffer_cfg = overlong_buffer_cfg
+
+        if self.overlong_buffer_cfg is not None:
+            assert self.max_resp_length is not None, f'max resp length must be provided if {self.overlong_buffer_cfg=}, but got None'
+
 
     def __call__(self, data: DataProto):
         """We will expand this function gradually based on the available datasets"""
@@ -96,7 +101,14 @@ class BatchedRewardManager:
 
         for i in range(len(data)):
             reward_tensor[i, valid_response_length - 1] = scores[i]
-
+            if self.overlong_buffer_cfg.enable:
+                overlong_buffer_len = self.overlong_buffer_cfg.len
+                expected_len = self.max_respo_len - overlong_buffer_len
+                exceeded_len = valid_response_length - expected_len
+                overlong_penalty_factor = self.overlong_buffer_cfg.penalty_factor
+                overlong_reward = min(-exceeded_len / overlong_buffer_len * overlong_penalty_factor, 0)
+                reward_tensor[i, valid_response_length - 1] += overlong_reward
+            
         return reward_tensor
 
 def judge_compute_score(data_sources, solution_strs, ground_truths, extra_infos=None):
@@ -216,7 +228,7 @@ def main_task(config, compute_score=None):
         reward_manager_cls = BatchedRewardManager
     else:
         raise NotImplementedError
-    reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=0, compute_score=compute_score)
+    reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=0, compute_score=compute_score, overlong_buffer_cfg=config.custem_reward_function.overlong_buffer)
 
     # Turn off num_examine, context length too long
     if config.trainer.get('run_validation', True):
