@@ -238,7 +238,7 @@ def main_task(config, compute_score=None):
 
     # Turn off num_examine, context length too long
     if config.trainer.get('run_validation', True):
-        val_reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=0, compute_score=compute_score)
+        val_reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=0, compute_score=compute_score, overlong_buffer_cfg=config.reward_model.reward_manager.get('overlong_buffer', None), max_resp_length=config.data.max_response_length)
     else:
         val_reward_fn = None
 
