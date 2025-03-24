@@ -28,16 +28,16 @@ class BatchedRewardManager:
     """The reward manager.
     """
 
-    def __init__(self, tokenizer, num_examine, compute_score=None, overlong_buffer_cfg=None, max_resp_length=None) -> None:
-        print(f'Initializing BatchedRewardManager with {overlong_buffer_cfg=}, {max_resp_length=}')
+    def __init__(self, tokenizer, num_examine, compute_score=None, overlong_buffer_cfg=None, max_response_length=None) -> None:
+        print(f'Initializing BatchedRewardManager with {overlong_buffer_cfg=}, {max_response_length=}')
         self.tokenizer = tokenizer
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
         self.compute_score = compute_score or _default_compute_score
         self.overlong_buffer_cfg = overlong_buffer_cfg
-        self.max_resp_length = max_resp_length
+        self.max_response_length = max_response_length
 
         if self.overlong_buffer_cfg is not None:
-            assert self.max_resp_length is not None, f'max resp length must be provided if {self.overlong_buffer_cfg=}, but got None'
+            assert self.max_response_length is not None, f'max resp length must be provided if {self.overlong_buffer_cfg=}, but got None'
             assert self.overlong_buffer_cfg.enable in [True, False], f'{self.overlong_buffer_cfg.enable=} must be a boolean'
             assert self.overlong_buffer_cfg.len is not None, f'{self.overlong_buffer_cfg.len=} must be provided'
             assert self.overlong_buffer_cfg.penalty_factor is not None, f'{self.overlong_buffer_cfg.penalty_factor=} must be provided'
@@ -108,7 +108,7 @@ class BatchedRewardManager:
             reward_tensor[i, valid_response_length - 1] = scores[i]
             if self.overlong_buffer_cfg.enable:
                 overlong_buffer_len = self.overlong_buffer_cfg.len
-                expected_len = self.max_resp_len - overlong_buffer_len
+                expected_len = self.max_response_length - overlong_buffer_len
                 exceeded_len = valid_response_length - expected_len
                 overlong_penalty_factor = self.overlong_buffer_cfg.penalty_factor
                 overlong_reward = min(-exceeded_len / overlong_buffer_len * overlong_penalty_factor, 0)
@@ -234,11 +234,11 @@ def main_task(config, compute_score=None):
         reward_manager_cls = BatchedRewardManager
     else:
         raise NotImplementedError
-    reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=0, compute_score=compute_score, overlong_buffer_cfg=config.reward_model.reward_manager.get('overlong_buffer', None), max_resp_length=config.data.max_response_length)
+    reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=0, compute_score=compute_score, overlong_buffer_cfg=config.reward_model.reward_manager.get('overlong_buffer', None), max_response_length=config.data.max_response_length)
 
     # Turn off num_examine, context length too long
     if config.trainer.get('run_validation', True):
-        val_reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=0, compute_score=compute_score, overlong_buffer_cfg=config.reward_model.reward_manager.get('overlong_buffer', None), max_resp_length=config.data.max_response_length)
+        val_reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=0, compute_score=compute_score, overlong_buffer_cfg=config.reward_model.reward_manager.get('overlong_buffer', None), max_response_length=config.data.max_response_length)
     else:
         val_reward_fn = None
 
