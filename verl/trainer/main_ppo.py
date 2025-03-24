@@ -29,6 +29,7 @@ class BatchedRewardManager:
     """
 
     def __init__(self, tokenizer, num_examine, compute_score=None, overlong_buffer_cfg=None, max_resp_length=None) -> None:
+        print(f'Initializing BatchedRewardManager with {overlong_buffer_cfg=}, {max_resp_length=}')
         self.tokenizer = tokenizer
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
         self.compute_score = compute_score or _default_compute_score
@@ -37,6 +38,9 @@ class BatchedRewardManager:
 
         if self.overlong_buffer_cfg is not None:
             assert self.max_resp_length is not None, f'max resp length must be provided if {self.overlong_buffer_cfg=}, but got None'
+            assert self.overlong_buffer_cfg.enable in [True, False], f'{self.overlong_buffer_cfg.enable=} must be a boolean'
+            assert self.overlong_buffer_cfg.len is not None, f'{self.overlong_buffer_cfg.len=} must be provided'
+            assert self.overlong_buffer_cfg.penalty_factor is not None, f'{self.overlong_buffer_cfg.penalty_factor=} must be provided'
 
 
     def __call__(self, data: DataProto):
