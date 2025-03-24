@@ -340,10 +340,8 @@ def compute_policy_loss(old_log_prob, log_prob, advantages, eos_mask, cliprange,
 
     pg_losses = -advantages * ratio
     if cliprange_low is not None and cliprange_high is not None:
-        print('Using DAPO') # TODO: remove this print statement
         pg_losses2 = -advantages * torch.clamp(ratio, 1.0 - cliprange_low, 1.0 + cliprange_high)
     else:
-        print('Using PPO') # TODO: remove this print statement
         pg_losses2 = -advantages * torch.clamp(ratio, 1.0 - cliprange, 1.0 + cliprange)
 
     pg_loss = verl_F.masked_mean(torch.max(pg_losses, pg_losses2), eos_mask)
