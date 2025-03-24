@@ -272,6 +272,8 @@ class MegatronPPOActor(BasePPOActor):
 
             clip_ratio = meta_info['clip_ratio']
             entropy_coeff = meta_info['entropy_coeff']
+            clip_ratio_low = meta_info.get('clip_ratio_low', None)
+            clip_ratio_high = meta_info.get('clip_ratio_high', None)
 
             # compute policy loss
             logits = output.logits
@@ -281,7 +283,9 @@ class MegatronPPOActor(BasePPOActor):
                                                                           log_prob=log_prob,
                                                                           advantages=advantages,
                                                                           eos_mask=response_mask,
-                                                                          cliprange=clip_ratio)
+                                                                          cliprange=clip_ratio,
+                                                                          cliprange_low=clip_ratio_low,
+                                                                          cliprange_high=clip_ratio_high)
             entropy_loss = vocab_parallel_compute_entropy_loss(logits, eos_mask=response_mask)
             policy_loss = pg_loss - entropy_loss * entropy_coeff
             # return loss and stats
@@ -302,7 +306,7 @@ class MegatronPPOActor(BasePPOActor):
             if forward_only:
                 meta_info = None
             else:
-                meta_info = {'clip_ratio': self.config.clip_ratio, 'entropy_coeff': self.config.entropy_coeff}
+                meta_info = {'clip_ratio': self.config.clip_ratio, 'entropy_coeff': self.config.entropy_coeff, 'clip_ratio_low': self.config.get('clip_ratio_low', None), 'clip_ratio_high': self.config.get('clip_ratio_high', None)}
             return output, partial(loss_func, data=batch, meta_info=meta_info)
 
         # batch should be a list of batches inside micro-batches
