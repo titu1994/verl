@@ -14,6 +14,7 @@
 """
 Note that we don't combine the main with ray_trainer as ray_trainer is used by other main.
 """
+from collections import defaultdict
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 
 import ray
@@ -43,12 +44,15 @@ class BatchedRewardManager:
             assert self.overlong_buffer_cfg.penalty_factor is not None, f'{self.overlong_buffer_cfg.penalty_factor=} must be provided'
 
 
-    def __call__(self, data: DataProto):
+    def __call__(self, data: DataProto, return_dict=False):
         """We will expand this function gradually based on the available datasets"""
 
         # If there is rm score, we directly return rm score. Otherwise, we compute via rm_score_fn
         if 'rm_scores' in data.batch.keys():
-            return data.batch['rm_scores']
+            if return_dict:
+                return {"reward": data.batch['rm_scores']}
+            else:
+                return data.batch['rm_scores']
 
         reward_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
 
@@ -95,14 +99,23 @@ class BatchedRewardManager:
 
             if already_print_data_sources[data_source] < self.num_examine:
                 already_print_data_sources[data_source] += 1
-                print(sequences_str)
+                print(f'{sequences_str=}, {ground_truth=}')
 
-        scores = self.compute_score(
+        result = self.compute_score(
             data_sources=data_sources,
             solution_strs=solutions,
             ground_truths=ground_truths,
             extra_infos=extra_infos,
         )
+
+        reward_extra_info = defaultdict(list)
+
+        if isinstance(result, dict):
+            scores = result['score']
+            for k, v in scores.items():
+                reward_extra_info[k] = v
+        else:
+            scores = result
 
         for i in range(len(data)):
             reward_tensor[i, valid_response_length - 1] = scores[i]
@@ -113,7 +126,8 @@ class BatchedRewardManager:
                 overlong_penalty_factor = self.overlong_buffer_cfg.penalty_factor
                 overlong_reward = min(-exceeded_len / overlong_buffer_len * overlong_penalty_factor, 0)
                 reward_tensor[i, valid_response_length - 1] += overlong_reward
-            
+        if return_dict:
+            return {'reward_tensor': reward_tensor, 'reward_extra_info': reward_extra_info}
         return reward_tensor
 
 def judge_compute_score(data_sources, solution_strs, ground_truths, extra_infos=None):
