@@ -215,12 +215,9 @@ class DataParallelPPOActor(BasePPOActor):
 
         temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
 
-        old_log_probs_compute = data.meta_info['old_log_probs_compute']
-        if old_log_probs_compute:
-            select_keys = ['responses', 'input_ids', 'attention_mask', 'position_ids', 'old_log_probs', 'advantages']
-        else:
-            select_keys = ['responses', 'input_ids', 'attention_mask', 'position_ids', 'advantages']
-
+        
+        select_keys = ['responses', 'input_ids', 'attention_mask', 'position_ids', 'old_log_probs', 'advantages']
+        
         if self.config.use_kl_loss:
             select_keys.append('ref_log_prob')
         batch = data.select(batch_keys=select_keys).batch
@@ -254,7 +251,7 @@ class DataParallelPPOActor(BasePPOActor):
                     response_length = responses.size(1)
                     attention_mask = data['attention_mask']
                     response_mask = attention_mask[:, -response_length:]
-                    # old_log_prob = data['old_log_probs']
+                    old_log_prob = data['old_log_probs']
                     advantages = data['advantages']
 
                     clip_ratio = self.config.clip_ratio
@@ -264,13 +261,6 @@ class DataParallelPPOActor(BasePPOActor):
 
                     # all return: (bsz, response_length)
                     entropy, log_prob = self._forward_micro_batch(micro_batch=data, temperature=temperature)
-
-                    if old_log_probs_compute:
-                        old_log_prob = data['old_log_probs']
-                    else:
-                        # speed optimization, only compute old_log_prob when train_batch_size and ppo_mini_batch_size are the different
-                        # otherwise, old_log_prob is the same as log_prob, but no gradient
-                        old_log_prob = log_prob.clone().detach()
 
                     if self.config.adv_estimator == 'mirror_descent':
                         pg_loss, reinforce_loss, regularization_loss = core_algos.compute_mirror_descent_policy_loss(
