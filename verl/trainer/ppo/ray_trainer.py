@@ -1099,12 +1099,12 @@ class RayPPOTrainer(object):
                 if 'multi_modal_inputs' in new_batch.non_tensor_batch.keys():
                     gen_batch = new_batch.pop(
                         batch_keys=['input_ids', 'attention_mask', 'position_ids'],
-                        non_tensor_batch_keys=['raw_prompt_ids', 'multi_modal_data', 'multi_modal_inputs'],
+                        # non_tensor_batch_keys=['raw_prompt_ids', 'multi_modal_data', 'multi_modal_inputs'],
                     )
                 else:
                     gen_batch = new_batch.pop(
                         batch_keys=['input_ids', 'attention_mask', 'position_ids'],
-                        non_tensor_batch_keys=['raw_prompt_ids'],
+                        # non_tensor_batch_keys=['raw_prompt_ids'],
                     )
 
                 is_last_step = self.global_steps >= self.total_training_steps
@@ -1174,6 +1174,9 @@ class RayPPOTrainer(object):
                             reward_baseline_tensor = self.reward_fn(new_batch)
                             reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
 
+                            # Sanity check before pop gen_baseline_output.batch.keys()
+                            for k in gen_baseline_output.batch.keys():
+                                assert k in new_batch.batch.keys(), f'{k} not in {new_batch.batch.keys()}'
                             new_batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
 
                             new_batch.batch['reward_baselines'] = reward_baseline_tensor
