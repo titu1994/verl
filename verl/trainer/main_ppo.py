@@ -140,9 +140,9 @@ def judge_compute_score(data_sources, solution_strs, ground_truths, extra_infos=
         })
     return reward_func(solution_strs, None, prompt_metadata)
 
-def mcq_compute_score(data_sources, solution_strs, ground_truths, extra_infos=None):
+def mcq_compute_score(data_source, solution_str, ground_truth, extra_info=None):
     from nemo_skills.training.openrlhf.mcq_reward import reward_func_single
-    return reward_func_single(data_sources, solution_strs, ground_truths, None)
+    return reward_func_single(data_source, solution_str, ground_truth, extra_info)
 
 @hydra.main(config_path='config', config_name='ppo_trainer', version_base=None)
 def main(config):
