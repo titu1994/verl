@@ -1085,6 +1085,7 @@ class RayPPOTrainer(object):
         batch = None
         num_prompt_in_batch = 0
         num_gen_batches = 0
+        self.timeout.start_iterations()
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
                 metrics = {}
@@ -1338,9 +1339,13 @@ class RayPPOTrainer(object):
                             if is_last_step:
                                 last_val_metrics = val_metrics
                         metrics.update(val_metrics)
-
+                    
+                    self.timeout.mark_iteration()
                     if self.config.trainer.save_freq > 0 and ( is_last_step or \
                             self.global_steps % self.config.trainer.save_freq == 0):
+                        with _timer('save_checkpoint', timing_raw):
+                            self._save_checkpoint()
+                    elif self.timeout.check_save():
                         with _timer('save_checkpoint', timing_raw):
                             self._save_checkpoint()
 
