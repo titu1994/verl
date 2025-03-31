@@ -469,6 +469,7 @@ class ActorRolloutRefWorker(Worker):
                 self.generation_config.pad_token_id
                 if self.generation_config is not None else self.tokenizer.pad_token_id,
         }
+        print('prompts meta info', prompts.meta_info)
         prompts.meta_info.update(meta_info)
         with self.rollout_sharding_manager:
 

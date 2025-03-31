@@ -733,6 +733,7 @@ class RayPPOTrainer(object):
             # Store generated outputs
             output_ids = test_output_gen_batch.batch['responses']
             output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
+            
             sample_outputs.extend(output_texts)
 
             test_batch = test_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n_val, interleave=True)
@@ -1005,7 +1006,7 @@ class RayPPOTrainer(object):
 
                 # pop those keys for generation
                 gen_batch = batch.pop(batch_keys=['input_ids', 'attention_mask', 'position_ids'])
-
+                # print('gen_batch_info', gen_batch.meta_info)
                 with _timer('step', timing_raw):
                     # generate a batch
                     with _timer('gen', timing_raw):
@@ -1019,6 +1020,7 @@ class RayPPOTrainer(object):
                         extended_gen_batch = DataProto()
 
                         batch_as_dict = gen_batch.batch.to_dict()
+                        # print('gen_batch_info', batch_as_dict.meta_info)
                         original_batch_size = gen_batch.batch.batch_size[0]
 
                         num_gpus = self.actor_rollout_wg.world_size
@@ -1057,10 +1059,9 @@ class RayPPOTrainer(object):
                         for ids in gen_batch.batch['input_ids']
                     ]
                     output_texts = [
-                        self.tokenizer.decode(ids, skip_special_tokens=True)
+                        self.tokenizer.decode(ids, skip_special_tokens=False)
                         for ids in gen_batch_output.batch['responses']
                     ]
-
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with _timer('gen_max', timing_raw):
                             gen_baseline_batch = deepcopy(gen_batch)

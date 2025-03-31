@@ -37,6 +37,7 @@ from verl.utils.torch_functional import get_eos_mask, pad_2d_list_to_length
 from verl.workers.rollout.base import BaseRollout
 from vllm.distributed import parallel_state as vllm_ps
 from vllm import LLM, SamplingParams
+import vllm
 from verl.third_party.vllm import vllm_version
 
 # TODO
@@ -113,6 +114,7 @@ class vLLMRollout(BaseRollout):
             n=1,
             logprobs=1,  # can be set to 0 and let actor to recompute
             max_tokens=config.response_length,
+            include_stop_str_in_output=True,
         )
 
         # # we may detokenize the result all together later
@@ -128,7 +130,7 @@ class vLLMRollout(BaseRollout):
         self.sampling_params = SamplingParams(**kwargs)
 
         self.pad_token_id = tokenizer.pad_token_id
-
+        print(f"eos_token_id: {tokenizer.eos_token_id}")
     @contextmanager
     def update_sampling_params(self, **kwargs):
         # update sampling params
@@ -158,7 +160,8 @@ class vLLMRollout(BaseRollout):
 
         # used to construct attention_mask
         eos_token_id = prompts.meta_info['eos_token_id']
-
+        print(f"eos_token_id: {eos_token_id}")
+        print('prompt.meta_info', prompts.meta_info)
         batch_size = idx.size(0)
 
         idx_list = []
@@ -182,10 +185,10 @@ class vLLMRollout(BaseRollout):
                 sampling_params=self.sampling_params,
                 prompt_token_ids=idx_list,
                 use_tqdm=False)
-
+        
         # TODO(sgm): disable logprob when recompute_log_prob is enable
         # if n = 1: (bs, response_length) ; if n > 1: (bs * n, response_length)
-
+        
         response = []
         for output in outputs:
             for sample_id in range(len(output.outputs)):
@@ -234,5 +237,5 @@ class vLLMRollout(BaseRollout):
         # free vllm cache engine
         if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3') and self.config.free_cache_engine:
             self.inference_engine.free_cache_engine()
-
+        
         return DataProto(batch=batch)
