@@ -55,6 +55,7 @@ class BatchedRewardManager:
                 return data.batch['rm_scores']
 
         reward_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
+        reward_extra_info = defaultdict(list)
 
         already_print_data_sources = {}
 
@@ -63,6 +64,7 @@ class BatchedRewardManager:
         ground_truths = []
         extra_infos = []
         valid_response_lengths = []
+        prompts = []
 
         for i in range(len(data)):
             data_item = data[i]  # DataProtoItem
@@ -79,8 +81,11 @@ class BatchedRewardManager:
             valid_response_ids = response_ids[:valid_response_length]
 
             # decode
-            sequences = torch.cat((valid_prompt_ids, valid_response_ids))
-            sequences_str = self.tokenizer.decode(sequences)
+            prompt_str = self.tokenizer.decode(valid_prompt_ids)
+            response_str = self.tokenizer.decode(valid_response_ids)
+            eos_token = self.tokenizer.eos_token
+            if response_str.endswith(eos_token):
+                response_str = response_str[:-len(eos_token)]
 
             ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
 
@@ -89,17 +94,11 @@ class BatchedRewardManager:
             extra_info = data_item.non_tensor_batch.get('extra_info', None)
 
             data_sources.append(data_source)
-            solutions.append(sequences_str)
+            solutions.append(response_str)
             ground_truths.append(ground_truth)
             extra_infos.append(extra_info)
             valid_response_lengths.append(valid_response_length)
-
-            if data_source not in already_print_data_sources:
-                already_print_data_sources[data_source] = 0
-
-            if already_print_data_sources[data_source] < self.num_examine:
-                already_print_data_sources[data_source] += 1
-                print(f'{sequences_str=}, {ground_truth=}')
+            prompts.append(prompt_str)
 
         result = self.compute_score(
             data_sources=data_sources,
@@ -107,15 +106,15 @@ class BatchedRewardManager:
             ground_truths=ground_truths,
             extra_infos=extra_infos,
         )
-
-        reward_extra_info = defaultdict(list)
-
+        scores = []
         if isinstance(result, dict):
-            scores = result['score']
-            for k, v in result.items():
-                reward_extra_info[k] = v
+            score = result['score']
+            scores.append(score)
+            for key, value in result.items():
+                for v in value:
+                    reward_extra_info[key].append(v)
         else:
-            scores = result
+            reward_tensor = result
 
         for i in range(len(data)):
             reward_tensor[i, valid_response_length - 1] = scores[i]
@@ -126,6 +125,17 @@ class BatchedRewardManager:
                 overlong_penalty_factor = self.overlong_buffer_cfg.penalty_factor
                 overlong_reward = min(-exceeded_len / overlong_buffer_len * overlong_penalty_factor, 0)
                 reward_tensor[i, valid_response_length - 1] += overlong_reward
+                if self.overlong_buffer_cfg.log:
+                    reward_extra_info["overlong_reward"].append(overlong_reward)
+                    reward_extra_info["overlong"].append(overlong_reward < 0)
+            if data[i].non_tensor_batch['data_source'] not in already_print_data_sources:
+                already_print_data_sources[data_source] = 0
+            if already_print_data_sources[data_source] < self.num_examine:
+                already_print_data_sources[data_source] += 1
+                print("[prompt]",  prompts[i])
+                print("[response]", solutions[i])
+                print("[ground_truth]", ground_truths[i])
+                print(f'[score]', reward_tensor[i, valid_prompt_length - 1])
         if return_dict:
             return {'reward_tensor': reward_tensor, 'reward_extra_info': reward_extra_info}
         return reward_tensor
@@ -141,8 +151,8 @@ def judge_compute_score(data_sources, solution_strs, ground_truths, extra_infos=
     return reward_func(solution_strs, None, prompt_metadata)
 
 def mcq_compute_score(data_source, solution_str, ground_truth, extra_info=None):
-    from nemo_skills.training.openrlhf.mcq_reward import reward_func_single
-    return reward_func_single(data_source, solution_str, ground_truth, extra_info)
+    from nemo_skills.training.openrlhf.mcq_reward import reward_func_single, reward_func_batched
+    return reward_func_batched(data_source, solution_str, ground_truth, extra_info)
 
 @hydra.main(config_path='config', config_name='ppo_trainer', version_base=None)
 def main(config):
