@@ -154,7 +154,7 @@ def mcq_compute_score(data_source, solution_str, ground_truth, extra_info=None):
     from nemo_skills.training.openrlhf.mcq_reward import reward_func_single
     return reward_func_single(data_source, solution_str, ground_truth, extra_info)
 
-def mcq_compute_score_batched(data_source, solution_str, ground_truth, extra_info=None):
+def mcq_compute_score_batched(data_sources, solution_strs, ground_truths, extra_infos=None):
     from nemo_skills.training.openrlhf.mcq_reward import reward_func_batched
     return reward_func_batched(data_source, solution_str, ground_truth, extra_info)
 
