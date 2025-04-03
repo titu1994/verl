@@ -16,6 +16,7 @@ from verl import DataProto
 from verl.utils.reward_score import _default_compute_score
 import torch
 from collections import defaultdict
+from tqdm import tqdm
 
 
 class NaiveRewardManager:
@@ -91,7 +92,7 @@ class NaiveRewardManager:
 
         already_print_data_sources = {}
 
-        for i in range(len(data)):
+        for i in tqdm(range(len(data)), desc="Computing reward"):
             data_item = data[i]  # DataProtoItem
 
             prompt_ids = data_item.batch['prompts']
