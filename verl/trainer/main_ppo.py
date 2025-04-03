@@ -115,7 +115,8 @@ class BatchedRewardManager:
                     reward_extra_info[key].append(v)
         else:
             reward_tensor = result
-
+        print(f'{len(scores)=}, {len(data)=}, {len(data_sources)=}, {len(solutions)=}, {len(ground_truths)=}, {len(extra_infos)=}')
+        print(f'{reward_tensor.shape=}, {reward_tensor.dtype=}')
         for i in range(len(data)):
             reward_tensor[i, valid_response_length - 1] = scores[i]
             if self.overlong_buffer_cfg.enable:
