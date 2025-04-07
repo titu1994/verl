@@ -20,10 +20,10 @@ from typing import Optional
 
 def last_boxed_only_string(string: str) -> Optional[str]:
     """Extract the last LaTeX boxed expression from a string.
-    
+
     Args:
         string: Input string containing LaTeX code
-        
+
     Returns:
         The last boxed expression or None if not found
     """
@@ -50,10 +50,10 @@ def last_boxed_only_string(string: str) -> Optional[str]:
 
 def remove_boxed(s: str) -> str:
     """Remove the LaTeX boxed command from a string.
-    
+
     Args:
         s: String with format "\\boxed{content}"
-        
+
     Returns:
         The content inside the boxed command
     """
@@ -141,10 +141,10 @@ REMOVED_EXPRESSIONS = [
 
 def normalize_final_answer(final_answer: str) -> str:
     """Normalize a final answer to a quantitative reasoning question.
-    
+
     Args:
         final_answer: The answer string to normalize
-        
+
     Returns:
         Normalized answer string
     """
@@ -185,13 +185,13 @@ def is_correct_minerva(solution_str: str,
                        gt_need_extract: bool = False,
                        answer_pattern: str = r"(?i)Answer\s*:\s*([^\n]+)") -> tuple[bool, str]:
     """Check if the solution is correct according to Minerva criteria.
-    
+
     Args:
         solution_str: The solution string to check
         gt: The ground truth answer
         gt_need_extract: Whether the ground truth needs extraction
         answer_pattern: Regex pattern to extract the answer
-        
+
     Returns:
         Tuple of (is_correct, normalized_prediction)
     """
@@ -213,12 +213,12 @@ def is_correct_strict_box(pred: str,
                           gt: str,
                           pause_tokens_index: Optional[list[int]] = None) -> tuple[int, Optional[str]]:
     """Check if the prediction is correct using strict boxed answer criteria.
-    
+
     Args:
         pred: The prediction string
         gt: The ground truth answer
         pause_tokens_index: Indices of pause tokens
-        
+
     Returns:
         Tuple of (score, extracted_prediction)
     """
@@ -239,15 +239,17 @@ def is_correct_strict_box(pred: str,
 def verify(solution_str: str,
            answer: str,
            strict_box_verify: bool = False,
-           pause_tokens_index: Optional[list[int]] = None) -> bool:
+           pause_tokens_index: Optional[list[int]] = None,
+           answer_pattern: str = r"(?i)Answer\s*:\s*([^\n]+)",
+           ) -> bool:
     """Verify if the solution is correct.
-    
+
     Args:
         solution_str: The solution string to verify
         answer: The ground truth answer
         strict_box_verify: Whether to use strict box verification
         pause_tokens_index: Indices of pause tokens
-        
+
     Returns:
         True if the solution is correct, False otherwise
     """
@@ -255,22 +257,24 @@ def verify(solution_str: str,
         correct, pred = is_correct_strict_box(solution_str, answer, pause_tokens_index)
         return correct == 1, pred
 
-    correct, pred = is_correct_minerva(solution_str, answer)
+    correct, pred = is_correct_minerva(solution_str, answer, answer_pattern=answer_pattern)
     return correct, pred
 
 
 def compute_score(solution_str: str,
                   ground_truth: str,
                   strict_box_verify: bool = False,
-                  pause_tokens_index: Optional[list[int]] = None) -> float:
+                  pause_tokens_index: Optional[list[int]] = None,
+                  extra_info=None,
+                  ) -> float:
     """Compute the reward score for a solution.
-    
+
     Args:
         solution_str: The solution string
         ground_truth: The ground truth answer
         config: Configuration object containing reward model settings
         pause_tokens_index: Indices of pause tokens
-        
+
     Returns:
         Reward score (1.0 for correct, -1.0 for incorrect)
     """
@@ -278,7 +282,7 @@ def compute_score(solution_str: str,
     solution_str = solution_str[-300:]  # The longest answer in MATH-500 has 159 characters
 
     # Verify the solution
-    correct, pred = verify(solution_str, ground_truth, strict_box_verify, pause_tokens_index)
+    correct, pred = verify(solution_str, ground_truth, strict_box_verify, pause_tokens_index, answer_pattern=extra_info.get('regex', r'(?i)Answer\s*:\s*([^\n]+)'))
 
     reward = 1.0 if correct else -1.0
     acc = correct
