@@ -109,7 +109,7 @@ class BatchedRewardManager:
         scores = []
         if isinstance(result, dict):
             score = result['score']
-            scores.append(score)
+            scores = score
             for key, value in result.items():
                 for v in value:
                     reward_extra_info[key].append(v)
