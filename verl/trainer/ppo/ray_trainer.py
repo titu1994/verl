@@ -1202,7 +1202,8 @@ class RayPPOTrainer(object):
                             reward_tensor = reward_result['reward_tensor']
                             reward_extra_infos_dict = reward_result['reward_extra_info']
                         except Exception as e:
-                            print(f'Error in reward_fn: {e}')
+                            raise e
+                            # print(f'Error in reward_fn: {e}')
                             reward_tensor = self.reward_fn(new_batch)
                             reward_extra_infos_dict = {}
 
