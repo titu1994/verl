@@ -29,12 +29,20 @@ class BatchedRewardManager:
     """The reward manager.
     """
 
-    def __init__(self, tokenizer, num_examine, compute_score=None) -> None:
+    def __init__(
+            self,
+            tokenizer,
+            num_examine,
+            compute_score=None,
+            reward_fn_key=None, # TODO include these?
+            max_resp_len=None, # TODO include these?
+            overlong_buffer_cfg=None, # TODO include these?
+            ) -> None:
         self.tokenizer = tokenizer
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
         self.compute_score = compute_score or _default_compute_score
 
-    def __call__(self, data: DataProto):
+    def __call__(self, data: DataProto, return_dict=False):
         """We will expand this function gradually based on the available datasets"""
 
         # If there is rm score, we directly return rm score. Otherwise, we compute via rm_score_fn
@@ -100,15 +108,15 @@ class BatchedRewardManager:
 
         return reward_tensor
 
-def judge_compute_score(data_sources, solution_strs, ground_truths, extra_infos=None):
+def judge_compute_score(data_source, solution_str, ground_truth, extra_info=None):
     from nemo_skills.training.openrlhf.math_reward import reward_func
     prompt_metadata = []
-    for ground_truth, extra_info, in zip(ground_truths, extra_infos):
+    for ground_truth, extra_info, in zip([ground_truth], [extra_info]):
         prompt_metadata.append({
             "problem": extra_info['problem'],
             "expected_answer": ground_truth,
         })
-    return reward_func(solution_strs, None, prompt_metadata)
+    return reward_func([solution_str], None, prompt_metadata)
 
 def get_custom_reward_fn(config):
     import importlib.util, os
