@@ -112,11 +112,20 @@ def judge_compute_score(data_source, solution_str, ground_truth, extra_info=None
     from nemo_skills.training.openrlhf.math_reward import reward_func
     prompt_metadata = []
     for ground_truth, extra_info, in zip([ground_truth], [extra_info]):
+        # print(f"judging index: {extra_info['index']}")
         prompt_metadata.append({
             "problem": extra_info['problem'],
             "expected_answer": ground_truth,
         })
-    return reward_func([solution_str], None, prompt_metadata)
+    correct = acc = reward_func([solution_str], None, prompt_metadata)
+    reward = 1.0 if correct else -1.0
+    pred = ''
+
+    return {
+        "score": reward,
+        "acc": acc,
+        "pred": pred,
+    }
 
 def get_custom_reward_fn(config):
     import importlib.util, os
