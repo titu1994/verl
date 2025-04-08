@@ -20,112 +20,31 @@ import os
 import ray
 import hydra
 
-from verl import DataProto
-from verl.utils.reward_score import _default_compute_score
-import torch
-
-
-class BatchedRewardManager:
-    """The reward manager.
-    """
-
-    def __init__(
-            self,
-            tokenizer,
-            num_examine,
-            compute_score=None,
-            reward_fn_key=None, # TODO include these?
-            max_resp_len=None, # TODO include these?
-            overlong_buffer_cfg=None, # TODO include these?
-            ) -> None:
-        self.tokenizer = tokenizer
-        self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
-        self.compute_score = compute_score or _default_compute_score
-
-    def __call__(self, data: DataProto, return_dict=False):
-        """We will expand this function gradually based on the available datasets"""
-
-        # If there is rm score, we directly return rm score. Otherwise, we compute via rm_score_fn
-        if 'rm_scores' in data.batch.keys():
-            return data.batch['rm_scores']
-
-        reward_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
-
-        already_print_data_sources = {}
-
-        data_sources = []
-        solutions = []
-        ground_truths = []
-        extra_infos = []
-        valid_response_lengths = []
-
-        for i in range(len(data)):
-            data_item = data[i]  # DataProtoItem
-
-            prompt_ids = data_item.batch['prompts']
-
-            prompt_length = prompt_ids.shape[-1]
-
-            valid_prompt_length = data_item.batch['attention_mask'][:prompt_length].sum()
-            valid_prompt_ids = prompt_ids[-valid_prompt_length:]
-
-            response_ids = data_item.batch['responses']
-            valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum()
-            valid_response_ids = response_ids[:valid_response_length]
-
-            # decode
-            sequences = torch.cat((valid_prompt_ids, valid_response_ids))
-            sequences_str = self.tokenizer.decode(sequences)
-
-            ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
-
-            data_source = data_item.non_tensor_batch['data_source']
-
-            extra_info = data_item.non_tensor_batch.get('extra_info', None)
-
-            data_sources.append(data_source)
-            solutions.append(sequences_str)
-            ground_truths.append(ground_truth)
-            extra_infos.append(extra_info)
-            valid_response_lengths.append(valid_response_length)
-
-            if data_source not in already_print_data_sources:
-                already_print_data_sources[data_source] = 0
-
-            if already_print_data_sources[data_source] < self.num_examine:
-                already_print_data_sources[data_source] += 1
-                print(sequences_str)
-
-        scores = self.compute_score(
-            data_sources=data_sources,
-            solution_strs=solutions,
-            ground_truths=ground_truths,
-            extra_infos=extra_infos,
-        )
-
-        for i in range(len(data)):
-            reward_tensor[i, valid_response_length - 1] = scores[i]
-
-        return reward_tensor
 
 def judge_compute_score(data_source, solution_str, ground_truth, extra_info=None):
     from nemo_skills.training.openrlhf.math_reward import reward_func
+    from nemo_skills.code_execution.math_grader import extract_answer
     prompt_metadata = []
-    for ground_truth, extra_info, in zip([ground_truth], [extra_info]):
-        # print(f"judging index: {extra_info['index']}")
+    for gt, extra, in zip(ground_truth, extra_info):
         prompt_metadata.append({
-            "problem": extra_info['problem'],
-            "expected_answer": ground_truth,
+            "problem": extra['problem'],
+            "expected_answer": gt,
         })
-    correct = acc = reward_func([solution_str], None, prompt_metadata)
-    reward = 1.0 if correct else -1.0
-    pred = ''
+    correct = reward_func(solution_str, None, prompt_metadata)
 
-    return {
-        "score": reward,
-        "acc": acc,
-        "pred": pred,
-    }
+    results = []
+    for i, (acc, solution) in enumerate(zip(correct, solution_str)):
+        reward = 1.0 if acc else -1.0
+        pred = extract_answer(solution)
+        result = {
+            "score": reward,
+            "acc": acc.item(),
+            "pred": pred,
+        }
+        results.append(result)
+
+    return results
+
 
 def get_custom_reward_fn(config):
     import importlib.util, os
@@ -255,7 +174,8 @@ class TaskRunner:
             from verl.workers.reward_manager import PrimeRewardManager
             reward_manager_cls = PrimeRewardManager
         elif reward_manager_name == 'batched':
-            reward_manager_cls = BatchedRewardManager
+            from verl.workers.reward_manager import BatchRewardManager
+            reward_manager_cls = BatchRewardManager
         else:
             raise NotImplementedError
 
