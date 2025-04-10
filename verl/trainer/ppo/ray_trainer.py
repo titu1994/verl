@@ -761,12 +761,19 @@ class RayPPOTrainer(object):
             # Store original inputs
             input_ids = test_batch.batch['input_ids']
             input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
-            input_texts = [x for x in input_texts for _ in range(self.config.actor_rollout_ref.rollout.n_val)]
+            # If each prompt is repeated n_val times, replicate the input text accordingly
+            input_texts = [
+                x 
+                for x in input_texts 
+                for _ in range(self.config.actor_rollout_ref.rollout.n_val)
+            ]
             sample_inputs.extend(input_texts)
 
             # extend with uid info
-            test_batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(test_batch.batch))],
-                                                          dtype=object)
+            test_batch.non_tensor_batch['uid'] = np.array(
+                [str(uuid.uuid4()) for _ in range(len(test_batch.batch))],
+                dtype=object
+            )
 
             test_gen_batch = test_batch.pop(['input_ids', 'attention_mask', 'position_ids'])
             test_gen_batch.meta_info = {
@@ -779,18 +786,32 @@ class RayPPOTrainer(object):
             print(f'test_gen_batch meta info: {test_gen_batch.meta_info}')
 
             # pad to be divisible by dp_size
-            test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, self.actor_rollout_wg.world_size)
-            test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
+            test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(
+                test_gen_batch,
+                self.actor_rollout_wg.world_size
+            )
+            test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(
+                test_gen_batch_padded
+            )
             # unpad
-            test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size*self.config.actor_rollout_ref.rollout.n_val)
+            test_output_gen_batch = unpad_dataproto(
+                test_output_gen_batch_padded,
+                pad_size=pad_size * self.config.actor_rollout_ref.rollout.n_val
+            )
             print('validation generation end')
 
             # Store generated outputs
             output_ids = test_output_gen_batch.batch['responses']
-            output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
+            output_texts = [
+                self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids
+            ]
             sample_outputs.extend(output_texts)
 
-            test_batch = test_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n_val, interleave=True)
+            # Align the original test_batch with the new outputs
+            test_batch = test_batch.repeat(
+                repeat_times=self.config.actor_rollout_ref.rollout.n_val,
+                interleave=True
+            )
             test_batch = test_batch.union(test_output_gen_batch)
 
             # evaluate using reward_function
@@ -800,14 +821,23 @@ class RayPPOTrainer(object):
                 for key, lst in result["reward_extra_info"].items():
                     reward_extra_infos_dict[key].extend(lst)
 
-            # Store scores
+            # Store final rewards (sum over the sequence dimension)
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
 
-            data_source_lst.append(test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0]))
+            # Data source is typically a list of the same length as the number of samples
+            data_source_lst.append(
+                test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0])
+            )
 
-        self._maybe_log_val_generations_to_wandb(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
+        # optional: log examples to W&B
+        self._maybe_log_val_generations_to_wandb(
+            inputs=sample_inputs,
+            outputs=sample_outputs,
+            scores=sample_scores
+        )
 
+        # Sanity check: all extra info lists should align with sample_scores
         for lst in reward_extra_infos_dict.values():
             assert len(lst) == 0 or len(lst) == len(sample_scores)
 
@@ -826,12 +856,11 @@ class RayPPOTrainer(object):
         for data_source, prompt2var2vals in data_src2prompt2var2vals.items():
             for prompt, var2vals in prompt2var2vals.items():
                 n_resps = len(var2vals["final_reward"])
-                preds = var2vals["pred"]
                 for var_name, var_vals in var2vals.items():
                     if var_name in ["pred", "final_reward"]:
                         continue
-                    metric = {}
 
+                    metric = {}
                     metric[f"mean@{n_resps}"] = np.mean(var_vals)
                     metric[f"std@{n_resps}"] = np.std(var_vals)
 
@@ -842,20 +871,26 @@ class RayPPOTrainer(object):
                         n *= 2
                     ns.append(n_resps)
 
-                    data = [{"val": val, "pred": pred} for val, pred in zip(var_vals, preds)]
-                    for n in ns:
+                    data = [{"val": val} for val in var_vals]
+                    if "pred" in var2vals:
+                        data = [{"val": val, "pred": p}
+                                for val, p in zip(var_vals, var2vals["pred"])]
 
-                        (bon_mean, bon_std), (won_mean, won_std), (maj_n_mean, maj_n_std) = bootstrap_metric(
+                    for n in ns:
+                        (bon_mean, bon_std), \
+                        (won_mean, won_std), \
+                        (maj_n_mean, maj_n_std) = bootstrap_metric(
                             data,
                             subset_size=n,
                             reduce_fns=[
                                 lambda arr: np.max([d["val"] for d in arr]),
                                 lambda arr: np.min([d["val"] for d in arr]),
                                 partial(calc_maj_val, vote_key="pred", val_key="val")
-                            ])
-                        metric[f"best@{n}/mean"], metric[f"best@{n}/std"] = bon_mean, bon_std
+                            ]
+                        )
+                        metric[f"best@{n}/mean"],  metric[f"best@{n}/std"]  = bon_mean, bon_std
                         metric[f"worst@{n}/mean"], metric[f"worst@{n}/std"] = won_mean, won_std
-                        metric[f"maj@{n}/mean"], metric[f"maj@{n}/std"] = maj_n_mean, maj_n_std
+                        metric[f"maj@{n}/mean"],   metric[f"maj@{n}/std"]   = maj_n_mean, maj_n_std
 
                     data_src2prompt2var2metric[data_source][prompt][var_name] = metric
 
@@ -874,6 +909,39 @@ class RayPPOTrainer(object):
                     metric_dict[pfx] = np.mean(prompt_vals)
 
         val_metric_dict = {f"val/{key}": value for key, value in metric_dict.items()}
+
+        pass1_per_source = {}
+        for data_source, prompt2var2vals in data_src2prompt2var2vals.items():
+            pass1_list_for_src = []
+            k_for_this_source = None
+
+            for prompt, var2vals in prompt2var2vals.items():
+                if "acc" not in var2vals or len(var2vals["acc"]) == 0:
+                    continue
+                acc_vals = var2vals["acc"]
+                current_k = len(acc_vals)
+
+                if k_for_this_source is None:
+                    k_for_this_source = current_k
+                else:
+                    assert k_for_this_source == current_k, (
+                        f"Inconsistent # of responses for data_source {data_source}."
+                    )
+
+                success_count = sum(1 for x in acc_vals if x > 0)
+                pass1_for_prompt = success_count / current_k
+                pass1_list_for_src.append(pass1_for_prompt)
+
+            if pass1_list_for_src:
+                pass1_value = np.mean(pass1_list_for_src)
+                pass1_key = f"pass@1[{k_for_this_source}]" if k_for_this_source else "pass@1"
+                pass1_per_source[data_source] = (pass1_key, pass1_value)
+            else:
+                pass1_per_source[data_source] = ("pass@1", 0.0)
+
+        for data_source, (pass1_key, pass1_val) in pass1_per_source.items():
+            val_metric_dict[f"val/{data_source}/{pass1_key}"] = pass1_val
+
         return val_metric_dict
 
     def init_workers(self):
