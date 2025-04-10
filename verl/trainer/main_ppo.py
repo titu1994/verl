@@ -112,6 +112,7 @@ class BatchedRewardManager:
             scores = score
             for key, value in result.items():
                 for v in value:
+                    print(f'Adding {key} to reward_extra_info')
                     reward_extra_info[key].append(v)
         else:
             scores = result
