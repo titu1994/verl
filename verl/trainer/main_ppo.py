@@ -108,6 +108,7 @@ class BatchedRewardManager:
         )
         scores = []
         if isinstance(result, dict):
+            # result is a dictionary with "score", and possibly other arrays like "acc", "preds", etc.
             score = result['score']
             scores = score
             for key, value in result.items():
@@ -115,40 +116,55 @@ class BatchedRewardManager:
                 for v in value:
                     reward_extra_info[key].append(v)
         else:
+            # result is just a list/array of scores
             scores = result
+
         print(f'{len(scores)=}, {len(data)=}, {len(data_sources)=}, {len(solutions)=}, {len(ground_truths)=}, {len(extra_infos)=}')
         print(f'{reward_tensor.shape=}, {reward_tensor.dtype=}')
         print(f'{reward_extra_info.keys()=}')
         for k in reward_extra_info.keys():
             print(f'{k}: {len(reward_extra_info[k])}')
+            # If these are integer flags (e.g. accuracy), sum them up for a quick check
             if len(reward_extra_info[k]) > 0 and isinstance(reward_extra_info[k][0], int):
                 print(f'Total {k}: {sum(reward_extra_info[k])}')
-        assert len(scores) == reward_tensor.shape[0], f'{len(scores)=} != {reward_tensor.shape[0]=}, number of scores does not match the number of data'
-        for i in range(len(data)):
 
+        # Make sure the number of scores we got matches the batch size
+        assert len(scores) == reward_tensor.shape[0], (
+            f'{len(scores)=} != {reward_tensor.shape[0]=}, number of scores does not match the number of data'
+        )
+
+        for i in range(len(data)):
             data_source = data_sources[i]
             valid_response_length = valid_response_lengths[i]
 
-            reward_tensor[i, valid_response_length - 1] = scores[i]
+            final_score = scores[i]
             if self.overlong_buffer_cfg.enable:
                 overlong_buffer_len = self.overlong_buffer_cfg.len
                 expected_len = self.max_response_length - overlong_buffer_len
                 exceeded_len = valid_response_length - expected_len
                 overlong_penalty_factor = self.overlong_buffer_cfg.penalty_factor
                 overlong_reward = min(-exceeded_len / overlong_buffer_len * overlong_penalty_factor, 0)
-                reward_tensor[i, valid_response_length - 1] += overlong_reward
+                final_score += overlong_reward  # now final_score is the *penalized* score
                 if self.overlong_buffer_cfg.log:
                     reward_extra_info["overlong_reward"].append(overlong_reward)
                     reward_extra_info["overlong"].append(overlong_reward < 0)
-            if data[i].non_tensor_batch['data_source'] not in already_print_data_sources:
+
+            reward_tensor[i, valid_response_length - 1] = final_score
+
+            if "score" in reward_extra_info:
+                reward_extra_info["score"][i] = final_score
+
+            if data_source not in already_print_data_sources:
                 already_print_data_sources[data_source] = 0
-            if already_print_data_sources[data[i].non_tensor_batch['data_source']] < self.num_examine:
+            if already_print_data_sources[data_source] < self.num_examine:
                 already_print_data_sources[data_source] += 1
                 print("[prompt]",  prompts[i])
                 print("[response]", solutions[i])
                 print("[ground_truth]", ground_truths[i])
-                if 'pred' in reward_extra_info.keys():
-                    print("[pred]", reward_extra_info['pred'][i])
+
+                if 'preds' in reward_extra_info.keys():
+                    print("[pred]", reward_extra_info['preds'][i])
+
                 print('[score]', reward_tensor[i, valid_response_length - 1])
                 print("[data_source]", data_source)
         if return_dict:
