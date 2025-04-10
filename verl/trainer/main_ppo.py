@@ -108,7 +108,7 @@ class BatchedRewardManager:
         )
         scores = []
         if isinstance(result, dict):
-            # result is a dictionary with "score", and possibly other arrays like "acc", "preds", etc.
+            # result is a dictionary with "score", and possibly other arrays like "acc", "pred", etc.
             score = result['score']
             scores = score
             for key, value in result.items():
@@ -162,8 +162,8 @@ class BatchedRewardManager:
                 print("[response]", solutions[i])
                 print("[ground_truth]", ground_truths[i])
 
-                if 'preds' in reward_extra_info.keys():
-                    print("[pred]", reward_extra_info['preds'][i])
+                if 'pred' in reward_extra_info.keys():
+                    print("[pred]", reward_extra_info['pred'][i])
 
                 print('[score]', reward_tensor[i, valid_response_length - 1])
                 print("[data_source]", data_source)
