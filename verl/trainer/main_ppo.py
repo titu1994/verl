@@ -145,7 +145,8 @@ class BatchedRewardManager:
                 print("[prompt]",  prompts[i])
                 print("[response]", solutions[i])
                 print("[ground_truth]", ground_truths[i])
-                print("[pred]", reward_extra_info['pred'][i])
+                if 'pred' in reward_extra_info.keys():
+                    print("[pred]", reward_extra_info['pred'][i])
                 print('[score]', reward_tensor[i, valid_prompt_length - 1])
                 print("[data_source]", data_source)
         if return_dict:
