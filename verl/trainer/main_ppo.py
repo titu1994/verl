@@ -121,6 +121,7 @@ class BatchedRewardManager:
         print(f'{reward_extra_info.keys()=}')
         for k in reward_extra_info.keys():
             print(f'{k}: {len(reward_extra_info[k])}')
+            print(f'Total {k}: {sum(reward_extra_info[k])}')
         assert len(scores) == reward_tensor.shape[0], f'{len(scores)=} != {reward_tensor.shape[0]=}, number of scores does not match the number of data'
         for i in range(len(data)):
 
