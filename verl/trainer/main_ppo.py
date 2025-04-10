@@ -20,6 +20,19 @@ import os
 import ray
 import hydra
 
+def sandbox_compute_score(data_source, solution_str, ground_truth, extra_info=None):
+    from nemo_skills.code_execution.sandbox import LocalSandbox
+    from nemo_skills.code_execution.math_grader import extract_answer
+    sandbox = LocalSandbox()
+    pred = extract_answer(solution_str)
+    correct = sandbox.is_output_correct(pred, ground_truth)
+    acc = float(correct)
+    reward = 1.0 if correct else -1.0
+    return {
+        'score': reward,
+        'acc': acc,
+        'pred': pred,
+    }
 
 def judge_compute_score(data_source, solution_str, ground_truth, extra_info=None):
     from nemo_skills.training.openrlhf.math_reward import reward_func
