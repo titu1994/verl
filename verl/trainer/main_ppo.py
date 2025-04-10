@@ -118,6 +118,9 @@ class BatchedRewardManager:
             scores = result
         print(f'{len(scores)=}, {len(data)=}, {len(data_sources)=}, {len(solutions)=}, {len(ground_truths)=}, {len(extra_infos)=}')
         print(f'{reward_tensor.shape=}, {reward_tensor.dtype=}')
+        print(f'{reward_extra_info.keys()=}')
+        for k in reward_extra_info.keys():
+            print(f'{k}: {len(reward_extra_info[k])}')
         assert len(scores) == reward_tensor.shape[0], f'{len(scores)=} != {reward_tensor.shape[0]=}, number of scores does not match the number of data'
         for i in range(len(data)):
 
