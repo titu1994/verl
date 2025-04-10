@@ -121,7 +121,8 @@ class BatchedRewardManager:
         print(f'{reward_extra_info.keys()=}')
         for k in reward_extra_info.keys():
             print(f'{k}: {len(reward_extra_info[k])}')
-            print(f'Total {k}: {sum(reward_extra_info[k])}')
+            if len(reward_extra_info[k]) > 0 and isinstance(reward_extra_info[k][0], int):
+                print(f'Total {k}: {sum(reward_extra_info[k])}')
         assert len(scores) == reward_tensor.shape[0], f'{len(scores)=} != {reward_tensor.shape[0]=}, number of scores does not match the number of data'
         for i in range(len(data)):
 
@@ -148,7 +149,7 @@ class BatchedRewardManager:
                 print("[ground_truth]", ground_truths[i])
                 if 'pred' in reward_extra_info.keys():
                     print("[pred]", reward_extra_info['pred'][i])
-                print('[score]', reward_tensor[i, valid_prompt_length - 1])
+                print('[score]', reward_tensor[i, valid_response_length - 1])
                 print("[data_source]", data_source)
         if return_dict:
             print(f'Returning reward tensor with shape {reward_tensor.shape} and dtype {reward_tensor.dtype}')
