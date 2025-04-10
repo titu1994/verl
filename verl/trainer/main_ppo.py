@@ -111,8 +111,8 @@ class BatchedRewardManager:
             score = result['score']
             scores = score
             for key, value in result.items():
+                print(f'Adding {key} to reward_extra_info')
                 for v in value:
-                    print(f'Adding {key} to reward_extra_info')
                     reward_extra_info[key].append(v)
         else:
             scores = result
@@ -142,7 +142,9 @@ class BatchedRewardManager:
                 print("[prompt]",  prompts[i])
                 print("[response]", solutions[i])
                 print("[ground_truth]", ground_truths[i])
-                print(f'[score]', reward_tensor[i, valid_prompt_length - 1])
+                print("[pred]", reward_extra_info['pred'][i])
+                print('[score]', reward_tensor[i, valid_prompt_length - 1])
+                print("[data_source]", data_source)
         if return_dict:
             print(f'Returning reward tensor with shape {reward_tensor.shape} and dtype {reward_tensor.dtype}')
             print(f'Returning reward extra info with keys {reward_extra_info.keys()}')
