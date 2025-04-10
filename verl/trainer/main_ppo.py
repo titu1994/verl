@@ -119,6 +119,10 @@ class BatchedRewardManager:
         print(f'{reward_tensor.shape=}, {reward_tensor.dtype=}')
         assert len(scores) == reward_tensor.shape[0], f'{len(scores)=} != {reward_tensor.shape[0]=}, number of scores does not match the number of data'
         for i in range(len(data)):
+
+            data_source = data_sources[i]
+            valid_response_length = valid_response_lengths[i]
+
             reward_tensor[i, valid_response_length - 1] = scores[i]
             if self.overlong_buffer_cfg.enable:
                 overlong_buffer_len = self.overlong_buffer_cfg.len
@@ -132,13 +136,15 @@ class BatchedRewardManager:
                     reward_extra_info["overlong"].append(overlong_reward < 0)
             if data[i].non_tensor_batch['data_source'] not in already_print_data_sources:
                 already_print_data_sources[data_source] = 0
-            if already_print_data_sources[data_source] < self.num_examine:
+            if already_print_data_sources[data[i].non_tensor_batch['data_source']] < self.num_examine:
                 already_print_data_sources[data_source] += 1
                 print("[prompt]",  prompts[i])
                 print("[response]", solutions[i])
                 print("[ground_truth]", ground_truths[i])
                 print(f'[score]', reward_tensor[i, valid_prompt_length - 1])
         if return_dict:
+            print(f'Returning reward tensor with shape {reward_tensor.shape} and dtype {reward_tensor.dtype}')
+            print(f'Returning reward extra info with keys {reward_extra_info.keys()}')
             return {'reward_tensor': reward_tensor, 'reward_extra_info': reward_extra_info}
         return reward_tensor
 
