@@ -30,7 +30,6 @@ class BatchedRewardManager:
     """
 
     def __init__(self, tokenizer, num_examine, compute_score=None, overlong_buffer_cfg=None, max_response_length=None) -> None:
-        print(f'Initializing BatchedRewardManager with {overlong_buffer_cfg=}, {max_response_length=}')
         self.tokenizer = tokenizer
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
         self.compute_score = compute_score or _default_compute_score
@@ -112,21 +111,11 @@ class BatchedRewardManager:
             score = result['score']
             scores = score
             for key, value in result.items():
-                print(f'Adding {key} to reward_extra_info')
                 for v in value:
                     reward_extra_info[key].append(v)
         else:
             # result is just a list/array of scores
             scores = result
-
-        print(f'{len(scores)=}, {len(data)=}, {len(data_sources)=}, {len(solutions)=}, {len(ground_truths)=}, {len(extra_infos)=}')
-        print(f'{reward_tensor.shape=}, {reward_tensor.dtype=}')
-        print(f'{reward_extra_info.keys()=}')
-        for k in reward_extra_info.keys():
-            print(f'{k}: {len(reward_extra_info[k])}')
-            # If these are integer flags (e.g. accuracy), sum them up for a quick check
-            if len(reward_extra_info[k]) > 0 and isinstance(reward_extra_info[k][0], int):
-                print(f'Total {k}: {sum(reward_extra_info[k])}')
 
         # Make sure the number of scores we got matches the batch size
         assert len(scores) == reward_tensor.shape[0], (
@@ -168,8 +157,6 @@ class BatchedRewardManager:
                 print('[score]', reward_tensor[i, valid_response_length - 1])
                 print("[data_source]", data_source)
         if return_dict:
-            print(f'Returning reward tensor with shape {reward_tensor.shape} and dtype {reward_tensor.dtype}')
-            print(f'Returning reward extra info with keys {reward_extra_info.keys()}')
             return {'reward_tensor': reward_tensor, 'reward_extra_info': reward_extra_info}
         return reward_tensor
 
@@ -183,23 +170,12 @@ def judge_compute_score(data_sources, solution_strs, ground_truths, extra_infos=
         })
     return reward_func(solution_strs, None, prompt_metadata)
 
-def mcq_compute_score(data_source, solution_str, ground_truth, extra_info=None):
-    from nemo_skills.training.openrlhf.mcq_reward import reward_func_single
-    return reward_func_single(data_source, solution_str, ground_truth, extra_info)
-
-def mcq_compute_score_batched(data_sources, solution_strs, ground_truths, extra_infos=None):
-    from nemo_skills.training.openrlhf.mcq_reward import reward_func_batched
-    return reward_func_batched(data_sources, solution_strs, ground_truths, extra_infos)
 
 @hydra.main(config_path='config', config_name='ppo_trainer', version_base=None)
 def main(config):
     compute_score = config.reward_model.get('compute_score', None)
     if compute_score == 'math-judge':
         compute_score_fn = judge_compute_score
-    elif compute_score == 'mcq-accuracy':
-        compute_score_fn = mcq_compute_score
-    elif compute_score == 'mcq-accuracy-batched':
-        compute_score_fn = mcq_compute_score_batched
     else:
         compute_score_fn = None
     run_ppo(config, compute_score_fn)
@@ -279,8 +255,7 @@ def main_task(config, compute_score=None):
         role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
         mapping[Role.RewardModel] = global_pool_id
 
-    # reward_manager_name = config.reward_model.get("reward_manager", "naive")
-    reward_manager_name = config.reward_model.reward_manager.name
+    reward_manager_name = config.reward_model.reward_manager.get('name', 'naive')
     if reward_manager_name == 'naive':
         from verl.workers.reward_manager import NaiveRewardManager
         reward_manager_cls = NaiveRewardManager
@@ -291,11 +266,13 @@ def main_task(config, compute_score=None):
         reward_manager_cls = BatchedRewardManager
     else:
         raise NotImplementedError
-    reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=2, compute_score=compute_score, overlong_buffer_cfg=config.reward_model.reward_manager.get('overlong_buffer', None), max_response_length=config.data.max_response_length)
+    
+    num_examine = config.reward_model.reward_manager.get('num_examine', 0)
+    reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=num_examine, compute_score=compute_score, overlong_buffer_cfg=config.reward_model.reward_manager.get('overlong_buffer', None), max_response_length=config.data.max_response_length)
 
     # Turn off num_examine, context length too long
     if config.trainer.get('run_validation', True):
-        val_reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=2, compute_score=compute_score, overlong_buffer_cfg=config.reward_model.reward_manager.get('overlong_buffer', None), max_response_length=config.data.max_response_length)
+        val_reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=num_examine, compute_score=compute_score, overlong_buffer_cfg=config.reward_model.reward_manager.get('overlong_buffer', None), max_response_length=config.data.max_response_length)
     else:
         val_reward_fn = None
 

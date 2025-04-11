@@ -94,42 +94,9 @@ class ResourcePoolManager:
                                             name_prefix=resource_pool_name)
             self.resource_pool_dict[resource_pool_name] = resource_pool
 
-        self._check_resource_available()
-
     def get_resource_pool(self, role: Role) -> RayResourcePool:
         """Get the resource pool of the worker_cls"""
         return self.resource_pool_dict[self.mapping[role]]
-
-    def get_n_gpus(self) -> int:
-        """Get the number of gpus in this cluster."""
-        return sum([n_gpus for process_on_nodes in self.resource_pool_spec.values() for n_gpus in process_on_nodes])
-
-    def _check_resource_available(self):
-        """Check if the resource pool can be satisfied in this ray cluster."""
-        node_available_resources = ray.state.available_resources_per_node()
-        node_available_gpus = {node: node_info.get('GPU', 0) for node, node_info in node_available_resources.items()}
-
-        # check total required gpus can be satisfied
-        total_available_gpus = sum(node_available_gpus.values())
-        total_required_gpus = sum(
-            [n_gpus for process_on_nodes in self.resource_pool_spec.values() for n_gpus in process_on_nodes])
-        if total_available_gpus < total_required_gpus:
-            raise ValueError(
-                f"Total available GPUs {total_available_gpus} is less than total desired GPUs {total_required_gpus}")
-
-        # check each resource pool can be satisfied, O(#resource_pools * #nodes)
-        for resource_pool_name, process_on_nodes in self.resource_pool_spec.items():
-            num_gpus, num_nodes = process_on_nodes[0], len(process_on_nodes)
-            for node, available_gpus in node_available_gpus.items():
-                if available_gpus >= num_gpus:
-                    node_available_gpus[node] -= num_gpus
-                    num_nodes -= 1
-                    if num_nodes == 0:
-                        break
-            if num_nodes > 0:
-                raise ValueError(
-                    f"Resource pool {resource_pool_name}: {num_gpus}*{num_nodes} cannot be satisfied in this ray cluster"
-                )
     
 import torch
 from verl.utils.torch_functional import masked_mean
@@ -683,7 +650,10 @@ class RayPPOTrainer(object):
         import wandb
         columns = ["step", "input", "output", "reward"]
         
-        new_table = wandb.Table(columns=columns)
+        if not hasattr(self, 'training_table'):
+            self.training_table = wandb.Table(columns=columns)
+
+        new_table = wandb.Table(columns=columns, data=self.training_table.data)
         inputs = inputs[:generations_to_log]
         outputs = outputs[:generations_to_log]
         rewards = rewards[:generations_to_log]
@@ -691,6 +661,7 @@ class RayPPOTrainer(object):
             new_table.add_data(self.global_steps, inp, outp, rew)
 
         wandb.log({"train/generations": new_table}, step=self.global_steps)
+        self.training_table = new_table
 
     def _maybe_log_val_generations_to_wandb(self, inputs, outputs, scores):
         """Log a table of validation samples to wandb"""
@@ -783,7 +754,6 @@ class RayPPOTrainer(object):
                 'do_sample': True if self.config.actor_rollout_ref.rollout.n_val > 1 else False,
                 'validate': True,
             }
-            print(f'test_gen_batch meta info: {test_gen_batch.meta_info}')
 
             # pad to be divisible by dp_size
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(
@@ -798,7 +768,6 @@ class RayPPOTrainer(object):
                 test_output_gen_batch_padded,
                 pad_size=pad_size * self.config.actor_rollout_ref.rollout.n_val
             )
-            print('validation generation end')
 
             # Store generated outputs
             output_ids = test_output_gen_batch.batch['responses']
@@ -1172,8 +1141,6 @@ class RayPPOTrainer(object):
                         # non_tensor_batch_keys=['raw_prompt_ids'],
                     )
 
-                is_last_step = self.global_steps >= self.total_training_steps
-
                 with _timer('step', timing_raw):
                     # generate a batch
                     with _timer('gen', timing_raw):
@@ -1402,16 +1369,15 @@ class RayPPOTrainer(object):
 
                     # validate
                     if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and \
-                        (is_last_step or  self.global_steps % self.config.trainer.test_freq == 0):
+                        self.global_steps % self.config.trainer.test_freq == 0:
                         with _timer('testing', timing_raw):
                             val_metrics: dict = self._validate()
-                            if is_last_step:
-                                last_val_metrics = val_metrics
+                        pprint(f'Step {self.global_steps} validation metrics: {val_metrics}')
                         metrics.update(val_metrics)
                     
                     self.timeout.mark_iteration()
-                    if self.config.trainer.save_freq > 0 and ( is_last_step or \
-                            self.global_steps % self.config.trainer.save_freq == 0):
+                    if self.config.trainer.save_freq > 0 and \
+                            self.global_steps % self.config.trainer.save_freq == 0:
                         with _timer('save_checkpoint', timing_raw):
                             self._save_checkpoint()
                     elif self.timeout.check_save():
@@ -1431,8 +1397,17 @@ class RayPPOTrainer(object):
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 
-                if is_last_step:
-                    pprint(f'Final validation metrics: {last_val_metrics}')
-                    return
-
                 self.global_steps += 1
+                
+                if self.global_steps >= self.total_training_steps or self.timeout.last_saved:
+
+                    # perform validation after training
+                    if self.val_reward_fn is not None:
+                        val_metrics = self._validate()
+                        pprint(f'Final validation metrics: {val_metrics}')
+                        logger.log(data=val_metrics, step=self.global_steps)
+                    if self.config.trainer.save_freq > 0 and \
+                            (self.global_steps - 1) % self.config.trainer.save_freq != 0:
+                        with _timer('save_checkpoint', timing_raw):
+                            self._save_checkpoint()
+                    return
