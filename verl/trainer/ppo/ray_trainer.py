@@ -613,7 +613,7 @@ class RayPPOTrainer(object):
     
 
 
-    def log_generations_to_disk(inputs, outputs, rewards):
+    def _log_generations_to_disk(inputs, outputs, rewards):
         """
         Log generations (input, output, reward triplets) to a JSONL file.
 
@@ -1150,7 +1150,7 @@ class RayPPOTrainer(object):
                     total_rewards = batch.batch['token_level_rewards'].sum(-1).cpu().tolist()
                     if self.config.actor_rollout_ref.rollout.log_generations_to_disk:
                         # Log generations to disk
-                        log_generations_to_disk(inputs=input_texts, outputs=output_texts, rewards=total_rewards)
+                        self._log_generations_to_disk(inputs=input_texts, outputs=output_texts, rewards=total_rewards)
                     self._maybe_log_train_generations_to_wandb(
                             inputs=input_texts,
                             outputs=output_texts,
