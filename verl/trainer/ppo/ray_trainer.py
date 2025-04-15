@@ -621,8 +621,6 @@ class RayPPOTrainer(object):
             inputs (list): List of input questions.
             outputs (list): List of generated solutions.
             rewards (list): List of rewards (1 for correct, 0 for incorrect).
-            generations_to_log (int): Number of generations to log.
-            save_path (str): File path to save the JSONL file.
         """
         
         save_path = os.path.join(self.config.trainer.default_local_dir, 'generations', f'global_step_{self.global_steps}.jsonl')
