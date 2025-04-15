@@ -625,7 +625,8 @@ class RayPPOTrainer(object):
             save_path (str): File path to save the JSONL file.
         """
         
-        save_path = os.path.join(self.config.trainer.default_local_dir, 'generations', f'global_step_{self.global_steps}.jsonl')      
+        save_path = os.path.join(self.config.trainer.default_local_dir, 'generations', f'global_step_{self.global_steps}.jsonl')
+        inputs = [x for x in inputs for _ in range(self.config.actor_rollout_ref.rollout.n)]      
         os.makedirs(os.path.dirname(save_path), exist_ok=True) 
         with open(save_path, 'w', encoding='utf-8') as f:
             for inp, out, reward in zip(inputs, outputs, rewards):
