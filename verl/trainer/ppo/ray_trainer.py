@@ -613,7 +613,7 @@ class RayPPOTrainer(object):
     
 
 
-    def _log_generations_to_disk(inputs, outputs, rewards):
+    def _log_generations_to_disk(self, inputs, outputs, rewards):
         """
         Log generations (input, output, reward triplets) to a JSONL file.
 
