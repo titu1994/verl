@@ -18,6 +18,7 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import os
 import uuid
+import json
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
@@ -609,6 +610,35 @@ class RayPPOTrainer(object):
         wandb.log({"train/generations": new_table}, step=self.global_steps)
         self.training_table = new_table
 
+    
+
+
+    def log_generations_to_disk(inputs, outputs, rewards):
+        """
+        Log generations (input, output, reward triplets) to a JSONL file.
+
+        Args:
+            inputs (list): List of input questions.
+            outputs (list): List of generated solutions.
+            rewards (list): List of rewards (1 for correct, 0 for incorrect).
+            generations_to_log (int): Number of generations to log.
+            save_path (str): File path to save the JSONL file.
+        """
+        
+        save_path = os.path.join(self.config.trainer.default_local_dir, 'generations', f'global_step_{self.global_steps}.jsonl')      
+        os.makedirs(os.path.dirname(save_path), exist_ok=True) 
+        with open(save_path, 'w', encoding='utf-8') as f:
+            for inp, out, reward in zip(inputs, outputs, rewards):
+                record = {
+                    "input": inp,
+                    "output": out,
+                    "reward": reward
+                }
+                f.write(json.dumps(record, ensure_ascii=False) + '\n')
+
+    
+    
+    
     def _maybe_log_val_generations_to_wandb(self, inputs, outputs, scores):
         """Log a table of validation samples to wandb"""
 
@@ -1118,6 +1148,9 @@ class RayPPOTrainer(object):
                                                   normalize=self.config.algorithm.normalize_advantage)
                                                             # Get total reward per sample
                     total_rewards = batch.batch['token_level_rewards'].sum(-1).cpu().tolist()
+                    if self.config.actor_rollout_ref.rollout.log_generations_to_disk:
+                        # Log generations to disk
+                        log_generations_to_disk(inputs=input_texts, outputs=output_texts, rewards=total_rewards)
                     self._maybe_log_train_generations_to_wandb(
                             inputs=input_texts,
                             outputs=output_texts,
