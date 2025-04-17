@@ -610,9 +610,6 @@ class RayPPOTrainer(object):
         wandb.log({"train/generations": new_table}, step=self.global_steps)
         self.training_table = new_table
 
-    
-
-
     def _log_generations_to_disk(self, inputs, outputs, rewards):
         """
         Log generations (input, output, reward triplets) to a JSONL file.
@@ -635,9 +632,7 @@ class RayPPOTrainer(object):
                 }
                 f.write(json.dumps(record, ensure_ascii=False) + '\n')
 
-    
-    
-    
+ 
     def _maybe_log_val_generations_to_wandb(self, inputs, outputs, scores):
         """Log a table of validation samples to wandb"""
 
