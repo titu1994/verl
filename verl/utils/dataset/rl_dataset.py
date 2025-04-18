@@ -26,6 +26,29 @@ from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from verl.utils.model import compute_position_id_with_mask
 import verl.utils.torch_functional as verl_F
+from verl.utils.torch_functional import get_eos_mask, pad_2d_list_to_length
+
+def pad_1d_tensor(sequence, pad_token_id, max_length):
+    """
+    Pad or truncate a 1D tensor to a specific length.
+
+    Args:
+        sequence (torch.Tensor): 1D tensor of token IDs.
+        pad_token_id (int): ID to use for padding.
+        max_length (int): Target length.
+
+    Returns:
+        torch.Tensor: Padded or truncated 1D tensor.
+    """
+    length = sequence.size(0)
+
+    if length < max_length:
+        padding = torch.full((max_length - length,), pad_token_id, dtype=sequence.dtype)
+        padded_sequence = torch.cat([sequence, padding])
+    else:
+        padded_sequence = sequence[:max_length]
+
+    return padded_sequence
 
 
 def collate_fn(data_list: list[dict]) -> dict:
@@ -84,6 +107,7 @@ class RLHFDataset(Dataset):
                  prompt_key='prompt',
                  image_key='images',
                  max_prompt_length=1024,
+                 response_length=1024,
                  filter_prompts=True,
                  cache_dir='~/.cache/verl/rlhf',
                  chat_template_func=None,
@@ -93,6 +117,7 @@ class RLHFDataset(Dataset):
         if not isinstance(parquet_files, (List, ListConfig)):
             parquet_files = [parquet_files]
 
+        
         self.parquet_files = copy.deepcopy(parquet_files)
         self.original_parquet_files = copy.deepcopy(parquet_files)  # use for resume
         self.cache_dir = os.path.expanduser(cache_dir)
@@ -102,6 +127,7 @@ class RLHFDataset(Dataset):
         self.prompt_key = prompt_key
         self.image_key = image_key
         self.max_prompt_length = max_prompt_length
+        self.response_length = response_length
         self.filter_prompts = filter_prompts
 
         self.return_raw_chat = return_raw_chat
@@ -209,10 +235,11 @@ class RLHFDataset(Dataset):
         row_dict['input_ids'] = input_ids[0]
         row_dict['attention_mask'] = attention_mask[0]
         row_dict['position_ids'] = position_ids[0]
+        row_dict['raw_prompt_ids'] = self.tokenizer.encode(raw_prompt, add_special_tokens=False)
         response = row_dict.pop('response')
         row_dict['response'] = torch.tensor(self.tokenizer.encode(response, add_special_tokens=False))
-        row_dict['raw_prompt_ids'] = self.tokenizer.encode(raw_prompt, add_special_tokens=False)
-
+        row_dict['response'] = pad_1d_tensor(row_dict['response'], self.tokenizer.pad_token_id,
+                                             max_length=self.response_length)
         # encode prompts without chat template
         if self.return_raw_chat:
             row_dict['raw_prompt'] = chat.tolist()
@@ -220,7 +247,7 @@ class RLHFDataset(Dataset):
         # add index for each prompt
         index = row_dict.get("extra_info", {}).get("index", 0)
         row_dict["index"] = index
-
+        
         return row_dict
 
     def __getstate__(self):

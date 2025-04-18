@@ -429,6 +429,7 @@ class RayPPOTrainer(object):
                                          prompt_key=self.config.data.prompt_key,
                                          image_key=self.config.data.get('image_key', 'images'),
                                          max_prompt_length=self.config.data.max_prompt_length,
+                                         response_length=self.config.data.max_response_length,
                                          filter_prompts=True,
                                          return_raw_chat=self.config.data.get('return_raw_chat', False),
                                          truncation=self.config.data.get('truncation', 'error'),
@@ -457,6 +458,7 @@ class RayPPOTrainer(object):
                                        prompt_key=self.config.data.prompt_key,
                                        image_key=self.config.data.get('image_key', 'images'),
                                        max_prompt_length=self.config.data.max_prompt_length,
+                                       response_length=self.config.data.max_response_length,
                                        filter_prompts=True,
                                        return_raw_chat=self.config.data.get('return_raw_chat', False),
                                        truncation=self.config.data.get('truncation', 'error'),
@@ -552,7 +554,7 @@ class RayPPOTrainer(object):
                 )
             else:
                 test_gen_batch = test_batch.pop(
-                    batch_keys=['input_ids', 'attention_mask', 'position_ids'],
+                    batch_keys=['input_ids', 'attention_mask', 'position_ids', 'response'],
                     non_tensor_batch_keys=['raw_prompt_ids'],
                 )
 
@@ -856,7 +858,7 @@ class RayPPOTrainer(object):
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
-        if self.val_reward_fn is not None and self.config.trainer.get('val_before_train', True):
+        if self.val_reward_fn is not None and self.config.trainer.get('val_before_train', False):
             val_metrics = self._validate()
             pprint(f'Initial validation metrics: {val_metrics}')
             logger.log(data=val_metrics, step=self.global_steps)
