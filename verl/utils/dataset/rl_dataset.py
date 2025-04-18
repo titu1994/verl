@@ -160,7 +160,6 @@ class RLHFDataset(Dataset):
         row_dict: dict = self.dataframe.iloc[item].to_dict()
 
         chat = row_dict.pop(self.prompt_key)
-
         prompt_with_chat_template = self.tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
 
         is_multi_modal = self.image_key in row_dict
@@ -210,6 +209,8 @@ class RLHFDataset(Dataset):
         row_dict['input_ids'] = input_ids[0]
         row_dict['attention_mask'] = attention_mask[0]
         row_dict['position_ids'] = position_ids[0]
+        response = row_dict.pop('response')
+        row_dict['response'] = torch.tensor(self.tokenizer.encode(response, add_special_tokens=False))
         row_dict['raw_prompt_ids'] = self.tokenizer.encode(raw_prompt, add_special_tokens=False)
 
         # encode prompts without chat template

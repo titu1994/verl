@@ -888,7 +888,7 @@ class RayPPOTrainer(object):
                     )
                 else:
                     gen_batch = new_batch.pop(
-                        batch_keys=['input_ids', 'attention_mask', 'position_ids'],
+                        batch_keys=['input_ids', 'attention_mask', 'position_ids', 'response'],
                         non_tensor_batch_keys=['raw_prompt_ids'],
                     )
 
@@ -915,9 +915,15 @@ class RayPPOTrainer(object):
 
                             del gen_baseline_batch, gen_baseline_output
 
-                    new_batch.non_tensor_batch['uid'] = np.array(
-                        [str(uuid.uuid4()) for _ in range(len(new_batch.batch))], dtype=object)
+                    # new_batch.non_tensor_batch['uid'] = np.array(
+                    #     [str(uuid.uuid4()) for _ in range(len(new_batch.batch))], dtype=object)
+                    
+                    ## As we already repeat the batch, we need to make sure the uid is unique per group and corresponded to our generated response
+                    ## here we n_trtllm to denote the number of repeated responses by trtllm server
+                    batch.non_tensor_batch['uid'] = np.repeat([str(uuid.uuid4()) for _ in range(len(batch.batch) // self.config.actor_rollout_ref.rollout.n_trtllm)],
+                                                              self.config.actor_rollout_ref.rollout.n).astype(object)
                     # repeat to align with repeated responses in rollout
+                    
                     new_batch = new_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     new_batch = new_batch.union(gen_batch_output)
 

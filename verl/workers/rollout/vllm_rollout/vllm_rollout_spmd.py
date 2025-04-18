@@ -209,19 +209,21 @@ class vLLMRollout(BaseRollout):
 
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**kwargs):
-            outputs = self.inference_engine.generate(
-                prompts=vllm_inputs,  # because we have already convert it to prompt token id
-                sampling_params=self.sampling_params,
-                use_tqdm=False)
+            # outputs = self.inference_engine.generate(
+            #     prompts=vllm_inputs,  # because we have already convert it to prompt token id
+            #     sampling_params=self.sampling_params,
+            #     use_tqdm=False)
 
-            # TODO(sgm): disable logprob when recompute_log_prob is enable
-            # if n = 1: (bs, response_length) ; if n > 1: (bs * n, response_length)
+            # # TODO(sgm): disable logprob when recompute_log_prob is enable
+            # # if n = 1: (bs, response_length) ; if n > 1: (bs * n, response_length)
 
-            response = []
-            for output in outputs:
-                for sample_id in range(len(output.outputs)):
-                    response.append(output.outputs[sample_id].token_ids)
+            # response = []
+            # for output in outputs:
+            #     for sample_id in range(len(output.outputs)):
+            #         response.append(output.outputs[sample_id].token_ids)
 
+            response = prompts.batch['response']  # (bs, response_length)
+            
             response = pad_2d_list_to_length(response, self.pad_token_id,
                                              max_length=self.config.response_length).to(idx.device)
 
