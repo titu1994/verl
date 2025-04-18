@@ -937,7 +937,7 @@ class RayPPOTrainer(object):
                             # we first compute reward model score
                             reward_tensor = self.rm_wg.compute_rm_score(new_batch)
                             new_batch = new_batch.union(reward_tensor)
-
+                            
                         # we combine with rule-based rm
                         reward_extra_infos_dict: dict[str, list]
                         try:
