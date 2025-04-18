@@ -95,7 +95,7 @@ class BatchRewardManager:
         solution_strs = []
         ground_truths = []
         extra_infos = []
-
+        judgements = []
         for i in range(len(data)):
             data_item = data[i]  # DataProtoItem
 
@@ -118,7 +118,7 @@ class BatchRewardManager:
                 response_str = response_str[:-len(eos_token)]
 
             ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
-
+            judgement =  data_item.non_tensor_batch['reward_model']['judgement']
             data_source = data_item.non_tensor_batch[self.reward_fn_key]
 
             extra_info = data_item.non_tensor_batch.get('extra_info', None)
@@ -127,12 +127,15 @@ class BatchRewardManager:
             solution_strs.append(response_str)
             ground_truths.append(ground_truth)
             extra_infos.append(extra_info)
+            judgements.append(judgement)
+            
 
         results = self.compute_score(
             data_source=data_sources,
             solution_str=solution_strs,
             ground_truth=ground_truths,
-            extra_info=extra_infos,
+            judgement=judgements,
+            extra_info=extra_infos
         )
 
         for i, result in enumerate(results):

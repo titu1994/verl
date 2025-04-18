@@ -238,7 +238,7 @@ class RLHFDataset(Dataset):
         row_dict['raw_prompt_ids'] = self.tokenizer.encode(raw_prompt, add_special_tokens=False)
         response = row_dict.pop('response')
         row_dict['response'] = torch.tensor(self.tokenizer.encode(response, add_special_tokens=False))
-        row_dict['response'] = pad_1d_tensor(row_dict['response'], self.tokenizer.pad_token_id,
+        row_dict['response'] = pad_1d_tensor(row_dict['response'], self.tokenizer.eos_token_id,
                                              max_length=self.response_length)
         # encode prompts without chat template
         if self.return_raw_chat:

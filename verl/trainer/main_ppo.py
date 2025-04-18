@@ -34,17 +34,25 @@ def sandbox_compute_score(data_source, solution_str, ground_truth, extra_info=No
         'pred': pred,
     }
 
-def judge_compute_score(data_source, solution_str, ground_truth, extra_info=None):
-    from nemo_skills.training.openrlhf.math_reward import reward_func
-    from nemo_skills.code_execution.math_grader import extract_answer
-    prompt_metadata = []
-    for gt, extra, in zip(ground_truth, extra_info):
-        prompt_metadata.append({
-            "problem": extra['problem'],
-            "expected_answer": gt,
-        })
-    correct = reward_func(solution_str, None, prompt_metadata)
 
+def is_correct_judgement(judgement):
+    if 'Judgement:' not in judgement:
+        return False  # improper judgement format, so have to judge as false
+    verdict = judgement.split('Judgement:')[-1].strip()
+    return verdict.lower() == 'yes'
+
+def judge_compute_score(data_source, solution_str, ground_truth, judgements, extra_info=None):
+    # from nemo_skills.training.openrlhf.math_reward import reward_func
+    # from nemo_skills.code_execution.math_grader import extract_answer
+    # prompt_metadata = []
+    # for gt, extra, judge in zip(ground_truth, extra_info, judgement):
+    #     prompt_metadata.append({
+    #         "problem": extra['problem'],
+    #         "expected_answer": gt,
+    #         "judgement": judge
+    #     })
+    is_correct_array = [is_correct_judgement(judgement) for judgement in judgements]
+    correct = torch.tensor(is_correct_array, dtype=torch.float32)
     results = []
     for i, (acc, solution) in enumerate(zip(correct, solution_str)):
         reward = 1.0 if acc else -1.0
