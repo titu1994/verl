@@ -19,6 +19,7 @@ from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 import os
 import ray
 import hydra
+import torch
 
 def sandbox_compute_score(data_source, solution_str, ground_truth, extra_info=None):
     from nemo_skills.code_execution.sandbox import LocalSandbox
