@@ -44,7 +44,7 @@ def is_correct_judgement(judgement):
 
 def judge_compute_score(data_source, solution_str, ground_truth, judgements, extra_info=None):
     # from nemo_skills.training.openrlhf.math_reward import reward_func
-    # from nemo_skills.code_execution.math_grader import extract_answer
+    from nemo_skills.code_execution.math_grader import extract_answer
     # prompt_metadata = []
     # for gt, extra, judge in zip(ground_truth, extra_info, judgement):
     #     prompt_metadata.append({
