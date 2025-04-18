@@ -154,7 +154,7 @@ algorithm:
   gamma: 1.0
   lam: 1.0
   adv_estimator: gae
-  normalize_advantage: False # whether to normalize the advantage by std
+  normalize_advantage: True # whether to normalize the advantage by std
   kl_penalty: kl  # how to estimate kl divergence
   kl_ctrl:
     type: fixed
