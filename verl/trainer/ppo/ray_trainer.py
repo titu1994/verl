@@ -23,9 +23,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from pprint import pprint
-from typing import Type, Dict
+from typing import Any, Callable, Type, Dict
 from copy import deepcopy
+from collections import defaultdict
+from functools import partial
 
+import ray
 import numpy as np
 from codetiming import Timer
 from omegaconf import OmegaConf, open_dict
@@ -95,8 +98,7 @@ class ResourcePoolManager:
     def get_resource_pool(self, role: Role) -> RayResourcePool:
         """Get the resource pool of the worker_cls"""
         return self.resource_pool_dict[self.mapping[role]]
-
-
+    
 import torch
 from verl.utils.torch_functional import masked_mean
 
@@ -210,6 +212,37 @@ def reduce_metrics(metrics: dict):
     for key, val in metrics.items():
         metrics[key] = np.mean(val)
     return metrics
+
+
+def calc_maj_val(data: list[dict[str, Any]], vote_key: str, val_key: str) -> float:
+    """
+    Calculate the majority voting metric
+    """
+    vote2vals = defaultdict(list)
+    for d in data:
+        vote2vals[d[vote_key]].append(d[val_key])
+
+    vote2cnt = {k: len(v) for k, v in vote2vals.items()}
+    maj_vote = max(vote2cnt, key=vote2cnt.get)
+
+    maj_val = vote2vals[maj_vote][0]
+
+    return maj_val
+
+def bootstrap_metric(data: list[dict[str, Any]],
+                     subset_size: int,
+                     reduce_fns: list[Callable[[np.ndarray], float]],
+                     n_bootstrap: int = 1000,
+                     seed: int = 42) -> list[tuple[float, float]]:
+    np.random.seed(seed)
+
+    bootstrap_metric_lsts = [[] for _ in range(len(reduce_fns))]
+    for _ in range(n_bootstrap):
+        bootstrap_idxs = np.random.choice(len(data), size=subset_size, replace=True)
+        bootstrap_data = [data[i] for i in bootstrap_idxs]
+        for i, reduce_fn in enumerate(reduce_fns):
+            bootstrap_metric_lsts[i].append(reduce_fn(bootstrap_data))
+    return [(np.mean(lst), np.std(lst)) for lst in bootstrap_metric_lsts]
 
 
 def _compute_response_info(batch):
@@ -359,7 +392,7 @@ def compute_timing_metrics(batch, timing_raw):
 def _timer(name: str, timing_raw: Dict[str, float]):
     with Timer(name=name, logger=None) as timer:
         yield
-    timing_raw[name] = timer.last
+    timing_raw[name] += timer.last  # Allow to accumulate time
 
 
 class RayPPOTrainer(object):
@@ -440,6 +473,23 @@ class RayPPOTrainer(object):
         # number of GPUs total
         n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
 
+        filter_cfg = config.algorithm.filter_groups
+        if filter_cfg.enable:
+            assert filter_cfg.max_num_gen_batches > 0, f"{filter_cfg.max_num_gen_batches=}"
+            assert filter_cfg.metric is not None, f"{filter_cfg.metric=}"
+        else:
+            assert config.data.train_batch_size == config.data.gen_batch_size, \
+                f"train_batch_size must be equal to gen_batch_size when filter_groups.enable is False, but got {config.data.train_batch_size =} and {config.data.gen_batch_size =}"
+
+        overlong_buffer_cfg = config.reward_model.reward_manager.overlong_buffer #config.custom_reward_function.overlong_buffer
+        if overlong_buffer_cfg.enable:
+            assert config.data.max_response_length >= overlong_buffer_cfg.len > 0, \
+                f"{config.data.max_response_length=} / {overlong_buffer_cfg.len=}"
+        else:
+            assert overlong_buffer_cfg.len <= 0, f"{overlong_buffer_cfg.len=} > 0 but {overlong_buffer_cfg.enable=}"
+            assert overlong_buffer_cfg.penalty_factor <= 0, f"{overlong_buffer_cfg.penalty_factor=} > 0 but {overlong_buffer_cfg.enable=}"
+            assert overlong_buffer_cfg.log == False, f"{overlong_buffer_cfg.log=} == True but {overlong_buffer_cfg.enable=}"
+
         # 1. Check total batch size for data correctness
         real_train_batch_size = config.data.train_batch_size * config.actor_rollout_ref.rollout.n
         assert real_train_batch_size % n_gpus == 0, \
@@ -484,10 +534,12 @@ class RayPPOTrainer(object):
                                      "reward_model")
 
         # Actor
+        # check if train_batch_size is larger than ppo_mini_batch_size
         # if NOT dynamic_bsz, we must ensure:
         #    ppo_mini_batch_size is divisible by ppo_micro_batch_size
         #    ppo_micro_batch_size * sequence_parallel_size >= n_gpus
         if not config.actor_rollout_ref.actor.use_dynamic_bsz:
+            assert config.data.train_batch_size >= config.actor_rollout_ref.actor.ppo_mini_batch_size
             sp_size = config.actor_rollout_ref.actor.get('ulysses_sequence_parallel_size', 1)
             if config.actor_rollout_ref.actor.ppo_micro_batch_size is not None:
                 assert config.actor_rollout_ref.actor.ppo_mini_batch_size % config.actor_rollout_ref.actor.ppo_micro_batch_size == 0
@@ -495,6 +547,7 @@ class RayPPOTrainer(object):
 
         # critic
         if self.use_critic and not config.critic.use_dynamic_bsz:
+            assert config.data.train_batch_size >= config.critic.ppo_mini_batch_size
             sp_size = config.critic.get('ulysses_sequence_parallel_size', 1)
             if config.critic.ppo_micro_batch_size is not None:
                 assert config.critic.ppo_mini_batch_size % config.critic.ppo_micro_batch_size == 0
@@ -537,13 +590,13 @@ class RayPPOTrainer(object):
             sampler = SequentialSampler(data_source=self.train_dataset)
 
         self.train_dataloader = StatefulDataLoader(dataset=self.train_dataset,
-                                                   batch_size=self.config.data.train_batch_size,
+                                                   batch_size=self.config.data.gen_batch_size,
                                                    drop_last=True,
                                                    collate_fn=collate_fn,
                                                    sampler=sampler)
 
         assert len(self.train_dataloader) >= 1
-
+        
         if self.val_reward_fn is not None:
             self.val_dataset = RLHFDataset(parquet_files=self.config.data.val_files,
                                         tokenizer=self.tokenizer,
@@ -597,6 +650,7 @@ class RayPPOTrainer(object):
 
         import wandb
         columns = ["step", "input", "output", "reward"]
+        
         if not hasattr(self, 'training_table'):
             self.training_table = wandb.Table(columns=columns)
 
@@ -689,9 +743,8 @@ class RayPPOTrainer(object):
         self.validation_table = new_table
 
     def _validate(self):
-        reward_tensor_lst = []
         data_source_lst = []
-        data_uid_lst = []
+        reward_extra_infos_dict: dict[str, list] = defaultdict(list)
 
         # Lists to collect samples for the table
         sample_inputs = []
@@ -708,12 +761,19 @@ class RayPPOTrainer(object):
             # Store original inputs
             input_ids = test_batch.batch['input_ids']
             input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
-            input_texts = [x for x in input_texts for _ in range(self.config.actor_rollout_ref.rollout.n_val)]
+            # If each prompt is repeated n_val times, replicate the input text accordingly
+            input_texts = [
+                x 
+                for x in input_texts 
+                for _ in range(self.config.actor_rollout_ref.rollout.n_val)
+            ]
             sample_inputs.extend(input_texts)
 
             # extend with uid info
-            test_batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(test_batch.batch))],
-                                                          dtype=object)
+            test_batch.non_tensor_batch['uid'] = np.array(
+                [str(uuid.uuid4()) for _ in range(len(test_batch.batch))],
+                dtype=object
+            )
 
             test_gen_batch = test_batch.pop(['input_ids', 'attention_mask', 'position_ids'])
             test_gen_batch.meta_info = {
@@ -725,71 +785,162 @@ class RayPPOTrainer(object):
             }
 
             # pad to be divisible by dp_size
-            test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, self.actor_rollout_wg.world_size)
-            test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
+            test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(
+                test_gen_batch,
+                self.actor_rollout_wg.world_size
+            )
+            test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(
+                test_gen_batch_padded
+            )
             # unpad
-            test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size*self.config.actor_rollout_ref.rollout.n_val)
+            test_output_gen_batch = unpad_dataproto(
+                test_output_gen_batch_padded,
+                pad_size=pad_size * self.config.actor_rollout_ref.rollout.n_val
+            )
 
             # Store generated outputs
             output_ids = test_output_gen_batch.batch['responses']
-            output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
+            output_texts = [
+                self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids
+            ]
             sample_outputs.extend(output_texts)
 
-            test_batch = test_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n_val, interleave=True)
+            # Align the original test_batch with the new outputs
+            test_batch = test_batch.repeat(
+                repeat_times=self.config.actor_rollout_ref.rollout.n_val,
+                interleave=True
+            )
             test_batch = test_batch.union(test_output_gen_batch)
 
             # evaluate using reward_function
-            reward_tensor = self.val_reward_fn(test_batch)
+            result = self.val_reward_fn(test_batch, return_dict=True)
+            reward_tensor = result["reward_tensor"]
+            if "reward_extra_info" in result:
+                for key, lst in result["reward_extra_info"].items():
+                    reward_extra_infos_dict[key].extend(lst)
 
-            # Store scores
+            # Store final rewards (sum over the sequence dimension)
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
 
-            reward_tensor_lst.append(reward_tensor)
-            data_source = test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0])
-            for idx, x in enumerate(test_batch.non_tensor_batch['extra_info']):
-                if 'name' in x:
-                    data_source[idx] = x['name']
-            data_source_lst.append(data_source)
-            data_uid_lst.append(test_batch.non_tensor_batch['uid'])
+            # Data source is typically a list of the same length as the number of samples
+            data_source_lst.append(
+                test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0])
+            )
 
-        self._maybe_log_val_generations_to_wandb(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
+        # optional: log examples to W&B
+        self._maybe_log_val_generations_to_wandb(
+            inputs=sample_inputs,
+            outputs=sample_outputs,
+            scores=sample_scores
+        )
 
-        reward_tensor = torch.cat(reward_tensor_lst, dim=0).sum(-1).cpu()  # (batch_size,)
+        # Sanity check: all extra info lists should align with sample_scores
+        for lst in reward_extra_infos_dict.values():
+            assert len(lst) == 0 or len(lst) == len(sample_scores)
+
         data_sources = np.concatenate(data_source_lst, axis=0)
-        data_uids = np.concatenate(data_uid_lst, axis=0)
 
-        # evaluate test_score based on data source
-        data_source_reward = {}
-        for i in range(reward_tensor.shape[0]):
-            data_source = data_sources[i]
-            data_uid = data_uids[i]
-            if data_source not in data_source_reward:
-                data_source_reward[data_source] = {}
-            if data_uid not in data_source_reward[data_source]:
-                data_source_reward[data_source][data_uid] = []
-            data_source_reward[data_source][data_uid].append(reward_tensor[i].item())
+        data_src2prompt2var2vals = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+        for sample_idx, data_source in enumerate(data_sources):
+            prompt = sample_inputs[sample_idx]
+
+            var2vals = data_src2prompt2var2vals[data_source][prompt]
+            var2vals["final_reward"].append(sample_scores[sample_idx])
+            for metric_name, metric_vals in reward_extra_infos_dict.items():
+                var2vals[metric_name].append(metric_vals[sample_idx])
+
+        data_src2prompt2var2metric = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
+        for data_source, prompt2var2vals in data_src2prompt2var2vals.items():
+            for prompt, var2vals in prompt2var2vals.items():
+                n_resps = len(var2vals["final_reward"])
+                for var_name, var_vals in var2vals.items():
+                    if var_name in ["pred", "final_reward"]:
+                        continue
+
+                    metric = {}
+                    metric[f"mean@{n_resps}"] = np.mean(var_vals)
+                    metric[f"std@{n_resps}"] = np.std(var_vals)
+
+                    ns = []
+                    n = 2
+                    while n < n_resps:
+                        ns.append(n)
+                        n *= 2
+                    ns.append(n_resps)
+
+                    data = [{"val": val} for val in var_vals]
+                    if "pred" in var2vals:
+                        data = [{"val": val, "pred": p}
+                                for val, p in zip(var_vals, var2vals["pred"])]
+
+                    for n in ns:
+                        (bon_mean, bon_std), \
+                        (won_mean, won_std), \
+                        (maj_n_mean, maj_n_std) = bootstrap_metric(
+                            data,
+                            subset_size=n,
+                            reduce_fns=[
+                                lambda arr: np.max([d["val"] for d in arr]),
+                                lambda arr: np.min([d["val"] for d in arr]),
+                                partial(calc_maj_val, vote_key="pred", val_key="val")
+                            ]
+                        )
+                        metric[f"best@{n}/mean"],  metric[f"best@{n}/std"]  = bon_mean, bon_std
+                        metric[f"worst@{n}/mean"], metric[f"worst@{n}/std"] = won_mean, won_std
+                        metric[f"maj@{n}/mean"],   metric[f"maj@{n}/std"]   = maj_n_mean, maj_n_std
+
+                    data_src2prompt2var2metric[data_source][prompt][var_name] = metric
+
+        data_src2var2metric2prompt_vals = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+        for data_source, prompt2var2metric in data_src2prompt2var2metric.items():
+            for prompt, var2metric in prompt2var2metric.items():
+                for var_name, metric in var2metric.items():
+                    for metric_name, metric_val in metric.items():
+                        data_src2var2metric2prompt_vals[data_source][var_name][metric_name].append(metric_val)
 
         metric_dict = {}
-        stacked_rewards = []
-        for data_source, rewards in data_source_reward.items():
-            # shape (bs, n)
-            rewards = np.array(list(rewards.values()))
-            stacked_rewards.append(rewards)
-            # Here we assume reward model generates binary 0/1 rewards
-            metric_dict[f'val/test_score/{data_source}/pass@1'] = np.mean(rewards)
-            metric_dict[f'val/test_score/{data_source}/pass@1/std'] = np.mean(rewards.std(axis=1))
-            metric_dict[f'val/test_score/{data_source}/pass@{self.config.actor_rollout_ref.rollout.n_val}'] = np.mean(
-                rewards.max(axis=1))
+        for data_source, var2metric2prompt_vals in data_src2var2metric2prompt_vals.items():
+            for var_name, metric2prompt_vals in var2metric2prompt_vals.items():
+                for metric_name, prompt_vals in metric2prompt_vals.items():
+                    pfx = f"{data_source}/{var_name}/{metric_name}"
+                    metric_dict[pfx] = np.mean(prompt_vals)
 
-        if len(list(data_source_reward.keys())) > 1:
-            stacked_rewards = np.concatenate(stacked_rewards, axis=0)
-            metric_dict[f'val/test_score/all/pass@1'] = np.mean(stacked_rewards)
-            metric_dict[f'val/test_score/all/pass@1/std'] = np.mean(stacked_rewards.std(axis=1))
-            metric_dict[f'val/test_score/all/pass@{self.config.actor_rollout_ref.rollout.n_val}'] = np.mean(
-                stacked_rewards.max(axis=1))
+        val_metric_dict = {f"val/{key}": value for key, value in metric_dict.items()}
 
-        return metric_dict
+        pass1_per_source = {}
+        for data_source, prompt2var2vals in data_src2prompt2var2vals.items():
+            pass1_list_for_src = []
+            k_for_this_source = None
+
+            for prompt, var2vals in prompt2var2vals.items():
+                if "acc" not in var2vals or len(var2vals["acc"]) == 0:
+                    continue
+                acc_vals = var2vals["acc"]
+                current_k = len(acc_vals)
+
+                if k_for_this_source is None:
+                    k_for_this_source = current_k
+                else:
+                    assert k_for_this_source == current_k, (
+                        f"Inconsistent # of responses for data_source {data_source}."
+                    )
+
+                success_count = sum(1 for x in acc_vals if x > 0)
+                pass1_for_prompt = success_count / current_k
+                pass1_list_for_src.append(pass1_for_prompt)
+
+            if pass1_list_for_src:
+                pass1_value = np.mean(pass1_list_for_src)
+                pass1_key = f"pass@1[{k_for_this_source}]" if k_for_this_source else "pass@1"
+                pass1_per_source[data_source] = (pass1_key, pass1_value)
+            else:
+                pass1_per_source[data_source] = ("pass@1", 0.0)
+
+        for data_source, (pass1_key, pass1_val) in pass1_per_source.items():
+            val_metric_dict[f"val/{data_source}/{pass1_key}"] = pass1_val
+
+        return val_metric_dict
 
     def init_workers(self):
         """Init resource pool and worker group"""
@@ -900,7 +1051,7 @@ class RayPPOTrainer(object):
 
         # load from hdfs
         if self.config.trainer.default_hdfs_dir is not None:
-            NotImplementedError('load from hdfs is not implemented yet')
+            raise NotImplementedError('load from hdfs is not implemented yet')
         else:
             checkpoint_folder = self.config.trainer.default_local_dir  # TODO: check path
             if not os.path.isabs(checkpoint_folder):
@@ -994,17 +1145,30 @@ class RayPPOTrainer(object):
 
         # we start from step 1
         self.global_steps += 1
+        last_val_metrics = None
 
+        timing_raw = defaultdict(float)
+        batch = None
+        num_prompt_in_batch = 0
+        num_gen_batches = 0
         self.timeout.start_iterations()
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
                 metrics = {}
-                timing_raw = {}
 
-                batch: DataProto = DataProto.from_single_dict(batch_dict)
-
+                new_batch: DataProto = DataProto.from_single_dict(batch_dict)
+                num_gen_batches += 1
                 # pop those keys for generation
-                gen_batch = batch.pop(batch_keys=['input_ids', 'attention_mask', 'position_ids'])
+                if 'multi_modal_inputs' in new_batch.non_tensor_batch.keys():
+                    gen_batch = new_batch.pop(
+                        batch_keys=['input_ids', 'attention_mask', 'position_ids'],
+                        # non_tensor_batch_keys=['raw_prompt_ids', 'multi_modal_data', 'multi_modal_inputs'],
+                    )
+                else:
+                    gen_batch = new_batch.pop(
+                        batch_keys=['input_ids', 'attention_mask', 'position_ids'],
+                        # non_tensor_batch_keys=['raw_prompt_ids'],
+                    )
 
                 with _timer('step', timing_raw):
                     # generate a batch
@@ -1067,24 +1231,115 @@ class RayPPOTrainer(object):
                             gen_baseline_batch.meta_info['do_sample'] = False
                             gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
 
-                            batch = batch.union(gen_baseline_output)
-                            reward_baseline_tensor = self.reward_fn(batch)
+                            new_batch = new_batch.union(gen_baseline_output)
+                            reward_baseline_tensor = self.reward_fn(new_batch)
                             reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
 
-                            batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
+                            # Sanity check before pop gen_baseline_output.batch.keys()
+                            for k in gen_baseline_output.batch.keys():
+                                assert k in new_batch.batch.keys(), f'{k} not in {new_batch.batch.keys()}'
+                            new_batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
 
-                            batch.batch['reward_baselines'] = reward_baseline_tensor
+                            new_batch.batch['reward_baselines'] = reward_baseline_tensor
 
                             del gen_baseline_batch, gen_baseline_output
 
-                    batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))],
-                                                             dtype=object)
+                    new_batch.non_tensor_batch['uid'] = np.array(
+                        [str(uuid.uuid4()) for _ in range(len(new_batch.batch))], dtype=object)
                     # repeat to align with repeated responses in rollout
-                    batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                    batch = batch.union(gen_batch_output)
-                    batch.non_tensor_batch['sample_uid'] = np.array(
-                        [str(uuid.uuid4()) for _ in range(len(batch.batch))],
-                        dtype=object)
+                    new_batch = new_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                    new_batch = new_batch.union(gen_batch_output)
+
+                    with _timer('reward', timing_raw):
+                        # compute scores. Support both model and function-based.
+                        # We first compute the scores using reward model. Then, we call reward_fn to combine
+                        # the results from reward model and rule-based results.
+                        if self.use_rm:
+                            # we first compute reward model score
+                            reward_tensor = self.rm_wg.compute_rm_score(new_batch)
+                            new_batch = new_batch.union(reward_tensor)
+
+                        # we combine with rule-based rm
+                        reward_extra_infos_dict: dict[str, list]
+                        try:
+                            reward_result = self.reward_fn(new_batch, return_dict=True)
+                            reward_tensor = reward_result['reward_tensor']
+                            reward_extra_infos_dict = reward_result['reward_extra_info']
+                        except Exception as e:
+                            raise e
+                            # print(f'Error in reward_fn: {e}')
+                            reward_tensor = self.reward_fn(new_batch)
+                            reward_extra_infos_dict = {}
+
+                        new_batch.batch['token_level_scores'] = reward_tensor
+
+                        print(f'{list(reward_extra_infos_dict.keys())=}')
+                        if reward_extra_infos_dict:
+                            new_batch.non_tensor_batch.update({
+                                k: np.array(v) for k, v in reward_extra_infos_dict.items()
+                            })
+
+                        # compute rewards. apply_kl_penalty if available
+                        if not self.config.actor_rollout_ref.actor.get('use_kl_loss', False):
+                            new_batch, kl_metrics = apply_kl_penalty(new_batch,
+                                                                     kl_ctrl=self.kl_ctrl,
+                                                                     kl_penalty=self.config.algorithm.kl_penalty)
+                            metrics.update(
+                                kl_metrics)  # TODO: This will be cleared if we use multiple genenration batches
+                        else:
+                            new_batch.batch['token_level_rewards'] = new_batch.batch['token_level_scores']
+
+                    if not self.config.algorithm.filter_groups.enable:
+                        batch = new_batch
+                    else:  # NOTE: When prompts after filtering is less than train batch size, we skip to the next generation batch
+                        metric_name = self.config.algorithm.filter_groups.metric
+                        if metric_name == "seq_final_reward":
+                            # Turn to numpy for easier filtering
+                            new_batch.non_tensor_batch["seq_final_reward"] = new_batch.batch['token_level_scores'].sum(
+                                dim=-1).numpy()
+                        elif metric_name == "seq_reward":
+                            new_batch.non_tensor_batch["seq_reward"] = new_batch.batch['token_level_scores'].sum(
+                                dim=-1).numpy()
+
+                        # Collect the sequence reward for each trajectory
+                        prompt_uid2metric_vals = defaultdict(list)
+                        for uid, metric_val in zip(new_batch.non_tensor_batch['uid'],
+                                                   new_batch.non_tensor_batch[metric_name]):
+                            prompt_uid2metric_vals[uid].append(metric_val)
+
+                        prompt_uid2metric_std = {}
+                        for prompt_uid, metric_vals in prompt_uid2metric_vals.items():
+                            prompt_uid2metric_std[prompt_uid] = np.std(metric_vals)
+
+                        kept_prompt_uids = [uid for uid, std in prompt_uid2metric_std.items() if std > 0]
+                        num_prompt_in_batch += len(kept_prompt_uids)
+
+                        kept_traj_idxs = []
+                        for idx, traj_from_prompt_uid in enumerate(new_batch.non_tensor_batch['uid']):
+                            if traj_from_prompt_uid in kept_prompt_uids:
+                                kept_traj_idxs.append(idx)
+
+                        new_batch = new_batch[kept_traj_idxs]
+                        if batch is None:
+                            batch = new_batch
+                        else:
+                            batch = DataProto.concat([batch, new_batch])
+
+                        prompt_bsz = self.config.data.train_batch_size
+                        if num_prompt_in_batch < prompt_bsz:
+                            print(f'{num_prompt_in_batch=} < {prompt_bsz=}')
+                            max_num_gen_batches = self.config.algorithm.filter_groups.max_num_gen_batches
+                            if max_num_gen_batches <= 0 or num_gen_batches < max_num_gen_batches:
+                                print(f'{num_gen_batches=}. Keep generating...')
+                                continue
+                            else:
+                                raise ValueError(
+                                    f'{num_gen_batches=} >= {max_num_gen_batches=}. Generated too many. Please check your data.'
+                                )
+                        else:
+                            # Align the batch
+                            traj_bsz = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
+                            batch = batch[:traj_bsz]
 
                     # balance the number of valid tokens on each dp rank.
                     # Note that this breaks the order of data inside the batch.
@@ -1095,14 +1350,9 @@ class RayPPOTrainer(object):
                     batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
 
                     # recompute old_log_probs
-                    if self.config.data.train_batch_size == self.config.actor_rollout_ref.actor.ppo_mini_batch_size:
-                        batch.meta_info['old_log_probs_compute'] = False
-                        batch.meta_info['temperature'] = self.config.actor_rollout_ref.rollout.temperature
-                    else:
-                        batch.meta_info['old_log_probs_compute'] = True
-                        with _timer('old_log_prob', timing_raw):
-                            old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-                            batch = batch.union(old_log_prob)
+                    with _timer('old_log_prob', timing_raw):
+                        old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+                        batch = batch.union(old_log_prob)
 
                     if self.use_reference_policy:
                         # compute reference log_prob
@@ -1117,27 +1367,6 @@ class RayPPOTrainer(object):
                             batch = batch.union(values)
 
                     with _timer('adv', timing_raw):
-                        # compute scores. Support both model and function-based.
-                        # We first compute the scores using reward model. Then, we call reward_fn to combine
-                        # the results from reward model and rule-based results.
-                        if self.use_rm:
-                            # we first compute reward model score
-                            reward_tensor = self.rm_wg.compute_rm_score(batch)
-                            batch = batch.union(reward_tensor)
-
-                        # we combine with rule-based rm
-                        reward_tensor = self.reward_fn(batch)
-                        batch.batch['token_level_scores'] = reward_tensor
-
-                        # compute rewards. apply_kl_penalty if available
-                        if not self.config.actor_rollout_ref.actor.get('use_kl_loss', False):
-                            batch, kl_metrics = apply_kl_penalty(batch,
-                                                                 kl_ctrl=self.kl_ctrl,
-                                                                 kl_penalty=self.config.algorithm.kl_penalty)
-                            metrics.update(kl_metrics)
-                        else:
-                            batch.batch['token_level_rewards'] = batch.batch['token_level_scores']
-
                         # compute advantages, executed on the driver process
                         batch = compute_advantage(batch,
                                                   adv_estimator=self.config.algorithm.adv_estimator,
@@ -1145,16 +1374,16 @@ class RayPPOTrainer(object):
                                                   lam=self.config.algorithm.lam,
                                                   num_repeat=self.config.actor_rollout_ref.rollout.n,
                                                   normalize=self.config.algorithm.normalize_advantage)
-                                                            # Get total reward per sample
                     total_rewards = batch.batch['token_level_rewards'].sum(-1).cpu().tolist()
                     if self.config.actor_rollout_ref.rollout.log_generations_to_disk:
                         # Log generations to disk
                         self._log_generations_to_disk(inputs=input_texts, outputs=output_texts, rewards=total_rewards)
                     self._maybe_log_train_generations_to_wandb(
-                            inputs=input_texts,
-                            outputs=output_texts,
-                            rewards=total_rewards
-                        )
+                        inputs=input_texts, 
+                        outputs=output_texts, 
+                        rewards=total_rewards
+                    )
+
                     # update critic
                     if self.use_critic:
                         with _timer('update_critic', timing_raw):
@@ -1177,7 +1406,7 @@ class RayPPOTrainer(object):
                             val_metrics: dict = self._validate()
                         pprint(f'Step {self.global_steps} validation metrics: {val_metrics}')
                         metrics.update(val_metrics)
-
+                    
                     self.timeout.mark_iteration()
                     if self.config.trainer.save_freq > 0 and \
                             self.global_steps % self.config.trainer.save_freq == 0:
@@ -1190,12 +1419,18 @@ class RayPPOTrainer(object):
                 # collect metrics
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
+                timing_raw = defaultdict(float)  # clear timing
+
+                metrics["train/num_gen_batches"] = num_gen_batches
+                batch = None
+                num_prompt_in_batch = 0
+                num_gen_batches = 0
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 
                 self.global_steps += 1
-
+                
                 if self.global_steps >= self.total_training_steps or self.timeout.last_saved:
 
                     # perform validation after training
