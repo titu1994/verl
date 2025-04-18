@@ -134,7 +134,7 @@ class BatchRewardManager:
             data_source=data_sources,
             solution_str=solution_strs,
             ground_truth=ground_truths,
-            judgement=judgements,
+            judgements=judgements,
             extra_info=extra_infos
         )
 
