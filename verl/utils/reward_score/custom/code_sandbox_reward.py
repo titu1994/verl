@@ -554,51 +554,6 @@ def convert_functional_tests_to_asserts(func_name, tests):
     return unit_tests
 
 
-def execute_via_internal(
-    solution,
-    tests,
-    num_max_tests,
-    timeout,
-    language,
-    continuous=False,
-    fn_name=None,
-):
-    assert language.lower() == 'python', f"Unsupported language: {language}"
-    test_inputs = []
-    test_outputs = []
-    for key in tests:
-        if isinstance(tests[key], dict):
-            test_inputs.extend(tests[key].get("input", []))
-            test_outputs.extend(tests[key].get("output", []))
-
-    test_inputs = test_inputs[:num_max_tests]
-    test_outputs = test_outputs[:num_max_tests]
-
-    tests = {
-        'inputs': test_inputs,
-        'outputs': test_outputs,
-        'fn_name': fn_name,
-    }
-
-    # print('solution', solution)
-    # print('tests', tests)
-
-    success, _ = compute_score(
-        completion=solution,
-        test_cases=tests,
-        continuous=continuous,
-        timeout=timeout,
-    )
-    
-    if len(success) == 0:
-        if continuous:
-            return [False] * len(test_inputs)
-        else:
-            return [False]
-
-    return success
-
-
 def get_num_reasoning_tokens(response_token_ids, fence_start, answer_string, tokenizer, language):
     decoded = [tokenizer.decode([tok_id], skip_special_tokens=False) for tok_id in response_token_ids]
     lens = [len(tok) for tok in decoded]
@@ -757,26 +712,15 @@ def compute_single_item_score(
         assert test_type == 'stdin' or fn_name is not None, "fn_name is required for non-stdin tests"
         assert fn_name is None or test_type == 'functional', "fn_name is only supported for functional tests"
 
-        if sandbox == 'internal':
-            correct_list = execute_via_internal(
-                solution, 
-                tests, 
-                num_max_tests, 
-                timeout, 
-                language, 
-                continuous=continuous,
-                fn_name=fn_name,
-            )
-        else:
-            correct_list = execute_via_sandbox(
-                solution, 
-                tests, 
-                num_max_tests, 
-                sandbox, 
-                timeout, 
-                language, 
-                fn_name=fn_name,
-            )
+        correct_list = execute_via_sandbox(
+            solution, 
+            tests, 
+            num_max_tests, 
+            sandbox, 
+            timeout, 
+            language, 
+            fn_name=fn_name,
+        )
 
     return {
         'correct_list': correct_list,
@@ -1043,90 +987,6 @@ class RewardManager:
         with open(filepath, 'w') as f:
             for item in data:
                 print(json.dumps(item), file=f)
-
-    def _compute_with_semaphore(
-        self,
-        sem: threading.Semaphore,
-        sandbox,
-        valid_resp_ids,
-        item,
-        config,
-        event,
-        continuous,
-    ):
-        """
-        Helper that acquires a semaphore before calling compute_single_item_score,
-        ensuring concurrency limit is not exceeded for that sandbox.
-        """
-        with sem:
-            return compute_single_item_score(
-                response_token_ids=valid_resp_ids,
-                tokenizer=self.tokenizer,
-                non_tensor_datum=item.non_tensor_batch,
-                config=config,
-                event=event,
-                sandbox=sandbox,
-                continuous=continuous,
-            )
-
-    def compute_item_results(self, data, config, event, concurrency_per_sandbox: int):
-        """
-        Spawns tasks to compute item_results for each item in 'data',
-        respecting concurrency_per_sandbox for each sandbox.
-        Returns a list of item_result dicts in the same order as data.
-        """
-
-        item_results = [None] * len(data)
-
-        concurrency_locks = None
-        if concurrency_per_sandbox > 0:
-            # One semaphore per sandbox
-            concurrency_locks = {
-                sb: threading.Semaphore(concurrency_per_sandbox) for sb in self.sandboxes
-            }
-
-        continuous = config.reward_model.reward_fn_args.code.get('verifier_reward', 'fractional') == 'fractional'
-
-        with ThreadPoolExecutor() as executor:
-            futures = []
-            for i, item in enumerate(data):
-                batch = item.batch
-                prompt_len = batch['prompts'].shape[-1]
-                valid_resp_len = batch['attention_mask'][prompt_len:].sum()
-                valid_resp_ids = batch['responses'][:valid_resp_len]
-
-                # pick sandbox in round-robin or any other strategy
-                sb = self.sandboxes[i % len(self.sandboxes)]
-                sem = concurrency_locks[sb]
-
-                if concurrency_locks is not None:
-                    fut = executor.submit(
-                        self._compute_with_semaphore,
-                        sem,
-                        sb,
-                        valid_resp_ids,
-                        item,
-                        config,  # or config.meta_info, depending on usage
-                        event,
-                        continuous,
-                    )
-                else:
-                    fut = executor.submit(
-                        compute_single_item_score,
-                        response_token_ids=valid_resp_ids,
-                        tokenizer=self.tokenizer,
-                        non_tensor_datum=item.non_tensor_batch,
-                        config=config,
-                        event=event,
-                        sandbox=sb,
-                        continuous=continuous,
-                    )
-                futures.append((i, fut))
-
-            for i, fut in futures:
-                item_results[i] = fut.result()
-
-        return item_results
 
     def __call__(
         self,

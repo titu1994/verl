@@ -22,10 +22,24 @@ import torch
 import numpy as np
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer
+import yaml
+import json
 
 from verl.utils.model import compute_position_id_with_mask
 import verl.utils.torch_functional as verl_F
 
+
+def format_prompt_config(prompt_config, row_dict):
+    new_data = {}
+    for key, value in prompt_config.items():
+        if isinstance(value, dict):
+            new_data[key] = format_prompt_config(value, row_dict)
+        else:
+            try:
+                new_data[key] = value.format(**row_dict)
+            except:
+                new_data[key] = value
+    return new_data
 
 def apply_prompt_config(prompt_config, prompt_template, tokenizer):
     def apply_prompt_config(row_dict: dict):
