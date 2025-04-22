@@ -25,8 +25,8 @@ import threading
 from collections import OrderedDict, defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from nemo_codegen.code_execution.code_execution import sandbox_code_execution
-from nemo_codegen.code_execution.sandbox import get_sandbox
+from .code_execution import sandbox_code_execution
+from .sandbox import get_sandbox
 
 from verl import DataProto
 from verl.utils import torch_functional as torch_fn
@@ -957,7 +957,6 @@ class RewardManager:
     In __call__, we do:
       1. compute_item_results(...) [NEW method]
       2. aggregate rewards with _process_group
-      3. optionally apply logprob shaping
       4. return reward_tensor or the full tuple
     """
 
@@ -1005,7 +1004,6 @@ class RewardManager:
         config: dict | None = None,
         ref_policy=None,
         return_reward_only: bool = True,
-        logprob_reward_coef: float = 0.0,
         concurrency_per_sandbox: int = 16,  # <--- new
         item_results: list[dict] | None = None,
     ):
@@ -1014,7 +1012,6 @@ class RewardManager:
           1) Possibly short-circuit if 'rm_scores' in data
           2) Compute item_results (compute_item_results)
           3) Aggregate them prompt-by-prompt
-          4) Possibly apply logprob shaping
           5) Return a reward_tensor or full suite
         """
         if 'rm_scores' in data.batch.keys():
@@ -1117,33 +1114,6 @@ class RewardManager:
         # summarize metrics
         # metrics = {k: np.mean(v) for k, v in metrics.items() if len(v) > 0}
 
-        # 6) optional logprob shaping
-        if logprob_reward_coef > 0.0:
-            logprob_rewards = self.generate_logprob_reward(
-                config,
-                data,
-                non_reasoning_tokens,
-                response_pad_tokens,
-                ref_policy,
-            )
-            num_modified = 0
-            for uid, idxes in batches_indices.items():
-                # example: if we want to do some "ranking" or "mix"
-                eligible = [(i, idx) for i, idx in enumerate(idxes) if logprob_rewards[idx] is not None]
-                if len(eligible) <= 1:
-                    continue
-                vals = torch.tensor([logprob_rewards[idx] for _, idx in eligible], device=reward_tensor.device)
-                vals -= vals.min()
-                if vals.max() > 0:
-                    vals /= vals.max()
-                resp_lens = all_response_lengths[uid]
-                for (grp_i, global_i), lv in zip(eligible, vals):
-                    resp_idx = resp_lens[grp_i] - 1
-                    if abs(float(reward_tensor[global_i, resp_idx])) < 1e-2:
-                        reward_tensor[global_i, resp_idx] = logprob_reward_coef * lv
-                        num_modified += 1
-            print('log‑prob shaping applied to', num_modified, 'responses')
-
         # 7) special case 'val'
         if event == 'val':
             return pass_ret
@@ -1163,113 +1133,3 @@ class RewardManager:
             prompt_pad_tokens,
             metrics,
         )
-
-    def generate_logprob_reward(self, config, data, all_num_non_reasoning_tokens, response_num_pad_tokens, ref_policy):
-        # same logic as before, or adapt as needed
-        assert len(data) == len(all_num_non_reasoning_tokens)
-        logprob_rewards = [None] * len(data)
-        idx_solutions = []
-        logprob_batch = {'input_ids': [], 'attention_mask': [], 'position_ids': [], 'responses': []}
-        new_solution_len = []
-
-        max_response_length = data.batch['responses'].shape[1]
-        for i_batch in range(len(data)):
-            input_ids      = data[i_batch].batch['input_ids']
-            attention_mask = data[i_batch].batch['attention_mask']
-            position_ids   = data[i_batch].batch['position_ids']
-            response_ids   = data[i_batch].batch['responses']
-
-            num_non_reasoning_tokens = all_num_non_reasoning_tokens[i_batch]
-            prompt_len = input_ids[:-max_response_length].shape[-1]
-
-            if response_num_pad_tokens[i_batch] > 0:
-                amt = response_num_pad_tokens[i_batch]
-                input_ids      = input_ids[:-amt]
-                attention_mask = attention_mask[:-amt]
-                position_ids   = position_ids[:-amt]
-                response_ids   = response_ids[:-amt]
-
-            if num_non_reasoning_tokens == response_ids.shape[-1] or num_non_reasoning_tokens == 0:
-                continue
-
-            reasoning_ids = response_ids[:-num_non_reasoning_tokens]
-            prompt_and_reasoning_attention_mask = attention_mask[:-num_non_reasoning_tokens]
-            prompt_and_reasoning_position_ids   = position_ids[:-num_non_reasoning_tokens]
-
-            solutions = data[i_batch].non_tensor_batch['solutions']
-            idx_solution = None
-            for i_sol, lang_code in enumerate(solutions['language']):
-                if lang_code == 3:  # e.g. python3
-                    idx_solution = i_sol
-                    break
-            if idx_solution is None:
-                continue
-
-            solution_str = f"```python\n{solutions['solutions'][idx_solution]}\n```"
-            sol_data = self.tokenizer(solution_str, return_tensors='pt', add_special_tokens=False)
-            sol_token_ids = sol_data['input_ids'].to(device=input_ids.device)[0]
-            sol_attention_mask = sol_data['attention_mask'].to(device=input_ids.device)[0]
-
-            remaining_length = max_response_length - (reasoning_ids.shape[-1] + sol_token_ids.shape[-1])
-            if remaining_length < 0:
-                sol_token_ids = sol_token_ids[:remaining_length]
-                sol_attention_mask = sol_attention_mask[:remaining_length]
-                remaining_length = 0
-
-            # pad up
-            sol_token_ids = torch.cat([
-                sol_token_ids,
-                torch.ones(remaining_length, device=sol_token_ids.device, dtype=torch.long) * self.tokenizer.pad_token_id
-            ], dim=-1)
-            sol_attention_mask = torch.cat([
-                sol_attention_mask,
-                torch.zeros(remaining_length, device=sol_attention_mask.device, dtype=torch.long)
-            ], dim=-1)
-
-            delta_position_ids = torch.arange(1, sol_token_ids.shape[-1] + 1, device=sol_token_ids.device)
-            idx_solutions.append(i_batch)
-            new_solution_len.append(sol_token_ids.shape[-1])
-
-            full_solution_ids = torch.cat([reasoning_ids, sol_token_ids], dim=-1)
-            new_input_ids     = torch.cat([input_ids[:prompt_len], full_solution_ids], dim=-1)
-            new_attention_mask= torch.cat([prompt_and_reasoning_attention_mask, sol_attention_mask], dim=-1)
-
-            response_position_ids = prompt_and_reasoning_position_ids[-1] + delta_position_ids
-            new_position_ids      = torch.cat([prompt_and_reasoning_position_ids, response_position_ids], dim=-1)
-
-            logprob_batch['input_ids'].append(new_input_ids)
-            logprob_batch['attention_mask'].append(new_attention_mask)
-            logprob_batch['position_ids'].append(new_position_ids)
-            logprob_batch['responses'].append(full_solution_ids)
-
-        if len(idx_solutions) == 0:
-            return logprob_rewards
-
-        for k in logprob_batch:
-            logprob_batch[k] = torch.stack(logprob_batch[k])
-        num_samples = logprob_batch['input_ids'].shape[0]
-
-        world_size = config.trainer.nnodes * config.trainer.n_gpus_per_node
-        remainder = num_samples % world_size
-        if remainder != 0:
-            # replicate sample so total is multiple of world_size
-            num_repeats = world_size - remainder
-            for k in logprob_batch:
-                repeated_sample = torch.stack([logprob_batch[k][0]] * num_repeats, dim=0)
-                logprob_batch[k] = torch.cat([logprob_batch[k], repeated_sample], dim=0)
-
-        # convert to DataProto
-        logprob_batch = DataProto.from_single_dict(logprob_batch)
-        log_probs = ref_policy.compute_ref_log_prob(logprob_batch)
-        log_probs = log_probs.batch['ref_log_prob'][:num_samples]
-
-        processed_log_probs = []
-        for i in range(num_samples):
-            sol_len = new_solution_len[i]
-            chunk = log_probs[i, -sol_len:]
-            processed_log_probs.append(chunk.mean().item())
-
-        for i, j in enumerate(idx_solutions):
-            logprob_rewards[j] = processed_log_probs[i]
-
-        return logprob_rewards
