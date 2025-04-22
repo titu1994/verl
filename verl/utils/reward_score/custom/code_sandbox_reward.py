@@ -443,6 +443,9 @@ def compute_reward(config, problem_type, all_formatting, all_correct_lists, all_
     group_policy = code_reward_args.get('verifier_group_reward', 'pass@1')
 
     unused_reasoning_penalty = reward_fn_args['penalties']['unused_reasoning']
+    overlong_buffer_cfg = config.reward_model.reward_manager.overlong_buffer
+    overlong_len_threshold = overlong_buffer_cfg.len
+    overlong_penalty_factor = overlong_buffer_cfg.penalty_factor
     max_gen_len = config.data.max_response_length
 
     group_rewards = [0.] * n
@@ -489,8 +492,13 @@ def compute_reward(config, problem_type, all_formatting, all_correct_lists, all_
                 (max_gen_len - (all_num_reasoning_tokens[i] + all_num_non_reasoning_tokens[i])) / max_gen_len
                 for i in range(n)
             ]
+            overthreshold_answer = [
+                max(0, (all_num_reasoning_tokens[i] + all_num_non_reasoning_tokens[i] - overlong_len_threshold) / overlong_len_threshold)
+                for i in range(n)
+            ]
+            overthreshold_answer_penalty = [overthreshold_answer[i] * overlong_penalty_factor for i in range(n)]
             unused_reasoning_penalty_vals = [unused_reasoning[i] * unused_reasoning_penalty for i in range(n)]
-            all_penalties = [p + u for p, u in zip(all_penalties, unused_reasoning_penalty_vals)]
+            all_penalties = [p + u + o for p, u, o in zip(all_penalties, unused_reasoning_penalty_vals, overthreshold_answer_penalty)]
 
         if (code_policy == 'pass@1') or (event == 'val'):
             pass_or_not_float = [float(x) for x in pass_or_not]

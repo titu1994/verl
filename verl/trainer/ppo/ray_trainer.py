@@ -280,6 +280,25 @@ def collect_code_reward_fn_metrics(reward_fn_metrics: list, reduction='mean'):
     return new_reward_fn_metrics
 
 
+def collect_reward_fn_metrics(reward_fn_metrics: list, reduction='mean'):
+    assert type(reward_fn_metrics) == list, f'{type(reward_fn_metrics)}'
+    new_reward_fn_metrics = {}
+    for i in range(len(reward_fn_metrics)):
+        for k, v in reward_fn_metrics[i].items():
+            if k not in new_reward_fn_metrics:
+                new_reward_fn_metrics[k] = []
+            if v != None:
+                new_reward_fn_metrics[k].append(v)
+    if reduction == 'mean':
+        for k, v in new_reward_fn_metrics.items():
+            new_reward_fn_metrics[k] = np.mean(v) if len(v) > 0 else None
+    elif reduction == 'none':
+        pass
+    else:
+        raise ValueError(f'Invalid reduction: {reduction}')
+    return new_reward_fn_metrics
+
+
 def compute_data_metrics(batch, use_critic=True):
     # TODO: add response length
     sequence_score = batch.batch['token_level_scores'].sum(-1)
@@ -1259,6 +1278,8 @@ class RayPPOTrainer(object):
         from verl.utils.tracking import Tracking
         from omegaconf import OmegaConf
 
+        wandb_id = self.config.trainer.get('wandb_id', None)
+
         logger = Tracking(project_name=self.config.trainer.project_name,
                         experiment_name=self.config.trainer.experiment_name,
                         default_backend=self.config.trainer.logger,
@@ -1353,8 +1374,8 @@ class RayPPOTrainer(object):
                             batch.batch['token_level_scores'] = reward_tensor
                             metrics.update(reward_fn_metrics)
                         else:
-                        # we combine with rule-based rm
-                        reward_extra_infos_dict: dict[str, list]
+                            # we combine with rule-based rm
+                            reward_extra_infos_dict: dict[str, list]
                             try:
                                 reward_result = self.reward_fn(new_batch, return_dict=True)
                                 reward_tensor = reward_result['reward_tensor']
@@ -1469,11 +1490,22 @@ class RayPPOTrainer(object):
                                                   num_repeat=self.config.actor_rollout_ref.rollout.n,
                                                   normalize=self.config.algorithm.normalize_advantage)
                     total_rewards = batch.batch['token_level_rewards'].sum(-1).cpu().tolist()
-                    self._maybe_log_train_generations_to_wandb(
-                        inputs=input_texts, 
-                        outputs=output_texts, 
-                        rewards=total_rewards
-                    )
+
+                    if self.config.actor_rollout_ref.rollout.get('wandb_train_generations', True):
+                        input_texts = [
+                            self.tokenizer.decode(ids, skip_special_tokens=True)
+                            for ids in gen_batch.batch['input_ids']
+                        ]
+                        output_texts = [
+                            self.tokenizer.decode(ids, skip_special_tokens=True)
+                            for ids in gen_batch_output.batch['responses']
+                        ]
+
+                        self._maybe_log_train_generations_to_wandb(
+                            inputs=input_texts, 
+                            outputs=output_texts, 
+                            rewards=total_rewards
+                        )
 
                     # update critic
                     if self.use_critic:
