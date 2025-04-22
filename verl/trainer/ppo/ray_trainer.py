@@ -18,6 +18,7 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import os
 import uuid
+import inspect
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
@@ -260,6 +261,25 @@ def _compute_response_info(batch):
     )
 
 
+def collect_code_reward_fn_metrics(reward_fn_metrics: list, reduction='mean'):
+    assert type(reward_fn_metrics) == list, f'{type(reward_fn_metrics)}'
+    new_reward_fn_metrics = {}
+    for i in range(len(reward_fn_metrics)):
+        for k, v in reward_fn_metrics[i].items():
+            if k not in new_reward_fn_metrics:
+                new_reward_fn_metrics[k] = []
+            if v != None:
+                new_reward_fn_metrics[k].append(v)
+    if reduction == 'mean':
+        for k, v in new_reward_fn_metrics.items():
+            new_reward_fn_metrics[k] = np.mean(v) if len(v) > 0 else None
+    elif reduction == 'none':
+        pass
+    else:
+        raise ValueError(f'Invalid reduction: {reduction}')
+    return new_reward_fn_metrics
+
+
 def compute_data_metrics(batch, use_critic=True):
     # TODO: add response length
     sequence_score = batch.batch['token_level_scores'].sum(-1)
@@ -393,6 +413,15 @@ def _timer(name: str, timing_raw: Dict[str, float]):
         yield
     timing_raw[name] += timer.last  # Allow to accumulate time
 
+def wrap_reward_fn(reward_fn):
+    params = inspect.signature(reward_fn).parameters
+    def wrapped_reward_fn(batch, **kwargs):
+        keys = list(kwargs.keys())
+        for key in keys:
+            if key not in params:
+                kwargs.pop(key)
+        return reward_fn(batch, **kwargs)
+    return wrapped_reward_fn
 
 class RayPPOTrainer(object):
     """
@@ -417,8 +446,8 @@ class RayPPOTrainer(object):
         )
         self.tokenizer = tokenizer
         self.config = config
-        self.reward_fn = reward_fn
-        self.val_reward_fn = val_reward_fn
+        self.reward_fn = wrap_reward_fn(reward_fn)
+        self.val_reward_fn = wrap_reward_fn(val_reward_fn)
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, 'Currently, only support hybrid engine'
@@ -573,13 +602,17 @@ class RayPPOTrainer(object):
 
     def _create_dataloader(self):
         # TODO: we have to make sure the batch size is divisible by the dp size
-        self.train_dataset = RLHFDataset(parquet_files=self.config.data.train_files,
-                                         tokenizer=self.tokenizer,
-                                         prompt_key=self.config.data.prompt_key,
-                                         max_prompt_length=self.config.data.max_prompt_length,
-                                         filter_prompts=True,
-                                         return_raw_chat=self.config.data.get('return_raw_chat', False),
-                                         truncation='error')
+        self.train_dataset = RLHFDataset(
+            parquet_files=self.config.data.train_files,
+            tokenizer=self.tokenizer,
+            prompt_key=self.config.data.prompt_key,
+            max_prompt_length=self.config.data.max_prompt_length,
+            filter_prompts=True,
+            return_raw_chat=self.config.data.get('return_raw_chat', False),
+            truncation='error',
+            prompt_config_files=self.config.data.get('prompt_config_files', None),
+            prompt_template_file=self.config.data.get('prompt_template_file', None)
+        )
         # use sampler for better ckpt resume
         if self.config.data.shuffle:
             train_dataloader_generator = torch.Generator()
@@ -597,13 +630,17 @@ class RayPPOTrainer(object):
         assert len(self.train_dataloader) >= 1
         
         if self.val_reward_fn is not None:
-            self.val_dataset = RLHFDataset(parquet_files=self.config.data.val_files,
-                                        tokenizer=self.tokenizer,
-                                        prompt_key=self.config.data.prompt_key,
-                                        max_prompt_length=self.config.data.max_prompt_length,
-                                        filter_prompts=True,
-                                        return_raw_chat=self.config.data.get('return_raw_chat', False),
-                                        truncation='error')
+            self.val_dataset = RLHFDataset(
+                parquet_files=self.config.data.val_files,
+                tokenizer=self.tokenizer,
+                prompt_key=self.config.data.prompt_key,
+                max_prompt_length=self.config.data.max_prompt_length,
+                filter_prompts=True,
+                return_raw_chat=self.config.data.get('return_raw_chat', False),
+                truncation='error',
+                prompt_config_files=self.config.data.get('prompt_config_files', None),
+                prompt_template_file=self.config.data.get('prompt_template_file', None)
+            )
             self.val_dataloader = StatefulDataLoader(
                 dataset=self.val_dataset,
                 # Validation datasets are sent to inference engines as a whole batch,
@@ -784,11 +821,14 @@ class RayPPOTrainer(object):
             test_batch = test_batch.union(test_output_gen_batch)
 
             # evaluate using reward_function
-            result = self.val_reward_fn(test_batch, return_dict=True)
-            reward_tensor = result["reward_tensor"]
-            if "reward_extra_info" in result:
-                for key, lst in result["reward_extra_info"].items():
-                    reward_extra_infos_dict[key].extend(lst)
+            if getattr(self.val_reward_fn, 'name', None) == 'code_sandbox_reward':
+                reward_tensor = self.compute_reward(test_batch, event='val')
+            else:
+                result = self.val_reward_fn(test_batch, return_dict=True, event='val')
+                reward_tensor = result["reward_tensor"]
+                if "reward_extra_info" in result:
+                    for key, lst in result["reward_extra_info"].items():
+                        reward_extra_infos_dict[key].extend(lst)
 
             # Store final rewards (sum over the sequence dimension)
             scores = reward_tensor.sum(-1).cpu().tolist()
@@ -1086,6 +1126,130 @@ class RayPPOTrainer(object):
                                                     prefix=logging_prefix)
         metrics.update(global_balance_stats)
 
+    def generate_sequences(self, gen_batch: DataProto):
+        # NOTE: this is very hacky, but doing this to work around the prompts >= num gpus restriction
+        #       this is supposed to just duplicate all prompts TP times since that's what
+        #       is done anyway in fsdp_workers.generate_sequences.
+        #       Just doing it here since it will be chunked by dp size * tp size when generate_sequences
+        #       is called below.
+        orig_gen_batch = gen_batch
+        tp_size = self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
+        extended_gen_batch = DataProto()
+
+        batch_as_dict = gen_batch.batch.to_dict()
+        original_batch_size = gen_batch.batch.batch_size[0]
+
+        num_gpus = self.actor_rollout_wg.world_size
+        assert num_gpus % tp_size == 0, f"num_gpus {num_gpus} must be divisible by tp_size {tp_size}"
+        real_dp = num_gpus // tp_size
+        assert original_batch_size % real_dp == 0, f"original_batch_size {original_batch_size} must be divisible by real_dp {real_dp}"
+        prompts_per_tp_group = original_batch_size // real_dp
+        assert prompts_per_tp_group > 0
+
+        output_dict = {}
+        for key, tensor in batch_as_dict.items():
+            duplicated_chunks = []
+
+            for i in range(real_dp):
+                start_idx = i * prompts_per_tp_group
+                end_idx = start_idx + prompts_per_tp_group
+                chunk = tensor[start_idx:end_idx]
+
+                duplicated_chunks.extend([chunk] * tp_size)
+
+            output_dict[key] = torch.cat(duplicated_chunks, dim=0)
+
+        extended_gen_batch.batch = TensorDict(
+            source=output_dict, batch_size=original_batch_size * tp_size
+        )
+        gen_batch_output = self.actor_rollout_wg.generate_sequences_nopreprocess(extended_gen_batch)
+        # double checking that there is no corruption
+        # TODO: remove after we are confident everything works in all settings
+        for idx in range(orig_gen_batch.batch.batch_size[0]):
+            assert torch.allclose(
+                orig_gen_batch.batch['input_ids'][idx],
+                # the layout should be prompt1, prompt1, ..., prompt2, prompt2, ...
+                gen_batch_output.batch['prompts'][idx * self.config.actor_rollout_ref.rollout.n],
+            )
+
+        return gen_batch_output
+
+    def compute_reward(self, batch, event=None, epoch=None, batch_index=None, return_reward_only=True):
+
+        batch.meta_info['config'] = self.config
+        batch.meta_info['event'] = event
+        world_size = self.actor_rollout_wg.world_size
+        batch_padded, pad_size = pad_dataproto_to_divisor(batch, world_size)
+
+        num_sandboxes = self.config.trainer.nnodes
+        ngpus = self.config.trainer.n_gpus_per_node
+        max_concurrency_per_sandbox = max(self.config.reward_model.reward_fn_args.get('concurrency_per_sandbox', 256), ngpus)
+        num_items_per_gpu = len(batch_padded) // world_size
+        max_concurrent_per_gpu = max_concurrency_per_sandbox // ngpus
+
+        if max_concurrent_per_gpu < num_items_per_gpu:
+            max_concurrent_per_gpu = [i for i in range(1, max_concurrent_per_gpu + 1) if num_items_per_gpu % i == 0][-1] # can make it more efficient by scanning till sqrt(max_concurrent_per_gpu) but w/ever
+            chunk_size = max_concurrent_per_gpu * ngpus * num_sandboxes
+
+            assert len(batch_padded) % chunk_size == 0, f"batch_padded size {len(batch_padded)} must be divisible by chunk_size {chunk_size}"
+            num_chunks = len(batch_padded) // chunk_size
+            batch_chunks = batch_padded.chunk(chunks=num_chunks)
+        else:
+            batch_chunks = [batch_padded]
+
+        item_results = []
+        for batch_chunk in batch_chunks:
+            scores = self.actor_rollout_wg.compute_score(batch_chunk)
+            item_results.extend(scores)
+
+        if pad_size > 0:
+            item_results = item_results[:-pad_size]
+
+        if event != 'val':
+            ret = self.reward_fn(
+                batch,
+                item_results=item_results,
+                event=event,
+                epoch=epoch,
+                batch_index=batch_index,
+                config=self.config, 
+                ref_policy=self.ref_policy_wg if self.config.reward_model.logprob_reward_coef > 0 else None,
+                return_reward_only=False,
+                logprob_reward_coef=self.config.reward_model.logprob_reward_coef,
+            )
+            reward_tensor, \
+            group_reward_tensor, \
+            pass_tensor, \
+            all_num_non_reasoning_tokens, \
+            response_num_pad_tokens, \
+            prompt_num_pad_tokens, \
+            reward_fn_metrics = ret
+
+            batch.batch['all_num_non_reasoning_tokens'] = all_num_non_reasoning_tokens
+            batch.batch['response_num_pad_tokens'] = response_num_pad_tokens
+            batch.batch['prompt_num_pad_tokens'] = prompt_num_pad_tokens
+            batch.batch['group_reward_tensor'] = group_reward_tensor
+            batch.batch['pass_tensor'] = pass_tensor
+
+            assert reward_tensor.shape[0] == len(reward_fn_metrics), f'{reward_tensor.shape} vs {len(reward_fn_metrics)}'
+
+            ret = reward_tensor, reward_fn_metrics
+
+            if return_reward_only:
+                ret = reward_tensor
+
+        else:
+            ret = self.val_reward_fn(
+                batch,
+                item_results=item_results,
+                event=event, 
+                config=self.config,
+                return_reward_only=True,
+            )
+
+        return ret
+
+
     def fit(self):
         """
         The training loop of PPO.
@@ -1096,9 +1260,10 @@ class RayPPOTrainer(object):
         from omegaconf import OmegaConf
 
         logger = Tracking(project_name=self.config.trainer.project_name,
-                          experiment_name=self.config.trainer.experiment_name,
-                          default_backend=self.config.trainer.logger,
-                          config=OmegaConf.to_container(self.config, resolve=True))
+                        experiment_name=self.config.trainer.experiment_name,
+                        default_backend=self.config.trainer.logger,
+                        wandb_id=wandb_id,
+                        config=OmegaConf.to_container(self.config, resolve=True))
 
         self.global_steps = 0
 
@@ -1124,7 +1289,7 @@ class RayPPOTrainer(object):
         num_gen_batches = 0
         self.timeout.start_iterations()
         for epoch in range(self.config.trainer.total_epochs):
-            for batch_dict in self.train_dataloader:
+            for i_batch, batch_dict in enumerate(self.train_dataloader):
                 metrics = {}
 
                 new_batch: DataProto = DataProto.from_single_dict(batch_dict)
@@ -1144,57 +1309,7 @@ class RayPPOTrainer(object):
                 with _timer('step', timing_raw):
                     # generate a batch
                     with _timer('gen', timing_raw):
-                        # NOTE: this is very hacky, but doing this to work around the prompts >= num gpus restriction
-                        #       this is supposed to just duplicate all prompts TP times since that's what
-                        #       is done anyway in fsdp_workers.generate_sequences.
-                        #       Just doing it here since it will be chunked by dp size * tp size when generate_sequences
-                        #       is called below.
-                        orig_gen_batch = gen_batch
-                        tp_size = self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
-                        extended_gen_batch = DataProto()
-
-                        batch_as_dict = gen_batch.batch.to_dict()
-                        original_batch_size = gen_batch.batch.batch_size[0]
-
-                        num_gpus = self.actor_rollout_wg.world_size
-                        real_dp = num_gpus // tp_size
-                        prompts_per_tp_group = original_batch_size // real_dp
-                        assert prompts_per_tp_group > 0
-
-                        output_dict = {}
-                        for key, tensor in batch_as_dict.items():
-                            duplicated_chunks = []
-
-                            for i in range(real_dp):
-                                start_idx = i * prompts_per_tp_group
-                                end_idx = start_idx + prompts_per_tp_group
-                                chunk = tensor[start_idx:end_idx]
-
-                                duplicated_chunks.extend([chunk] * tp_size)
-
-                            output_dict[key] = torch.cat(duplicated_chunks, dim=0)
-
-                        extended_gen_batch.batch = TensorDict(
-                            source=output_dict, batch_size=original_batch_size * tp_size
-                        )
-                        gen_batch_output = self.actor_rollout_wg.generate_sequences_nopreprocess(extended_gen_batch)
-                        # double checking that there is no corruption
-                        # TODO: remove after we are confident everything works in all settings
-                        for idx in range(orig_gen_batch.batch.batch_size[0]):
-                            assert torch.allclose(
-                                orig_gen_batch.batch['input_ids'][idx],
-                                # the layout should be prompt1, prompt1, ..., prompt2, prompt2, ...
-                                gen_batch_output.batch['prompts'][idx * self.config.actor_rollout_ref.rollout.n],
-                            )
-
-                    input_texts = [
-                        self.tokenizer.decode(ids, skip_special_tokens=True)
-                        for ids in gen_batch.batch['input_ids']
-                    ]
-                    output_texts = [
-                        self.tokenizer.decode(ids, skip_special_tokens=True)
-                        for ids in gen_batch_output.batch['responses']
-                    ]
+                        gen_batch_output = self.generate_sequences(gen_batch)
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with _timer('gen_max', timing_raw):
@@ -1230,25 +1345,33 @@ class RayPPOTrainer(object):
                             reward_tensor = self.rm_wg.compute_rm_score(new_batch)
                             new_batch = new_batch.union(reward_tensor)
 
+                        if getattr(self.val_reward_fn, 'name', None) == 'code_sandbox_reward':
+                            reward_tensor, \
+                            reward_fn_metrics = self.compute_reward(batch, event='rollout', epoch=epoch, batch_index=i_batch, return_reward_only=False)
+                            reward_fn_metrics = collect_reward_fn_metrics(reward_fn_metrics, reduction='mean')
+                            
+                            batch.batch['token_level_scores'] = reward_tensor
+                            metrics.update(reward_fn_metrics)
+                        else:
                         # we combine with rule-based rm
                         reward_extra_infos_dict: dict[str, list]
-                        try:
-                            reward_result = self.reward_fn(new_batch, return_dict=True)
-                            reward_tensor = reward_result['reward_tensor']
-                            reward_extra_infos_dict = reward_result['reward_extra_info']
-                        except Exception as e:
-                            raise e
-                            # print(f'Error in reward_fn: {e}')
-                            reward_tensor = self.reward_fn(new_batch)
-                            reward_extra_infos_dict = {}
+                            try:
+                                reward_result = self.reward_fn(new_batch, return_dict=True)
+                                reward_tensor = reward_result['reward_tensor']
+                                reward_extra_infos_dict = reward_result['reward_extra_info']
+                            except Exception as e:
+                                raise e
+                                # print(f'Error in reward_fn: {e}')
+                                reward_tensor = self.reward_fn(new_batch)
+                                reward_extra_infos_dict = {}
 
-                        new_batch.batch['token_level_scores'] = reward_tensor
+                            new_batch.batch['token_level_scores'] = reward_tensor
 
-                        print(f'{list(reward_extra_infos_dict.keys())=}')
-                        if reward_extra_infos_dict:
-                            new_batch.non_tensor_batch.update({
-                                k: np.array(v) for k, v in reward_extra_infos_dict.items()
-                            })
+                            print(f'{list(reward_extra_infos_dict.keys())=}')
+                            if reward_extra_infos_dict:
+                                new_batch.non_tensor_batch.update({
+                                    k: np.array(v) for k, v in reward_extra_infos_dict.items()
+                                })
 
                         # compute rewards. apply_kl_penalty if available
                         if not self.config.actor_rollout_ref.actor.get('use_kl_loss', False):

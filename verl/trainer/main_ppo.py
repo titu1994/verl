@@ -173,24 +173,40 @@ def judge_compute_score(data_sources, solution_strs, ground_truths, extra_infos=
 
 @hydra.main(config_path='config', config_name='ppo_trainer', version_base=None)
 def main(config):
+    remote_rm_url = config.reward_model.get('reward_manager', None)
     compute_score = config.reward_model.get('compute_score', None)
-    if compute_score == 'math-judge':
+    compute_score_fn = None
+    if (remote_rm_url is not None) and (remote_rm_url.endswith('.py')):
+        print(f"Loading custom `reward_func(queries, prompts)` from {remote_rm_url}")
+        import importlib.util
+        import inspect
+
+        spec = importlib.util.spec_from_file_location("reward_manager_module", remote_rm_url)
+        reward_module = importlib.util.module_from_spec(spec)
+        sys.modules['reward_manager_module'] = reward_module
+        spec.loader.exec_module(reward_module)
+        reward_manager = reward_module.RewardManager
+    elif remote_rm_url == 'code_sandbox_reward':
+        from verl.utils.reward_score.custom.code_sandbox_reward import RewardManager
+        reward_manager = RewardManager
+    elif compute_score == 'math-judge':
         compute_score_fn = judge_compute_score
     else:
+        reward_manager = None
         compute_score_fn = None
-    run_ppo(config, compute_score_fn)
+    run_ppo(config, reward_manager=reward_manager, compute_score=compute_score_fn)
 
 
-def run_ppo(config, compute_score=None):
+def run_ppo(config, reward_manager=None, compute_score=None):
     if not ray.is_initialized():
         # this is for local ray cluster
         ray.init(runtime_env={'env_vars': {'TOKENIZERS_PARALLELISM': 'true', 'NCCL_DEBUG': 'WARN'}})
 
-    ray.get(main_task.remote(config, compute_score))
+    ray.get(main_task.remote(config, reward_manager=reward_manager, compute_score=compute_score))
 
 
 @ray.remote(num_cpus=1)  # please make sure main_task is not scheduled on head
-def main_task(config, compute_score=None):
+def main_task(config, reward_manager=None, compute_score=None):
     from verl.utils.fs import copy_to_local
     # print initial config
     from pprint import pprint
@@ -255,8 +271,10 @@ def main_task(config, compute_score=None):
         role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
         mapping[Role.RewardModel] = global_pool_id
 
-    reward_manager_name = config.reward_model.reward_manager.get('name', 'naive')
-    if reward_manager_name == 'naive':
+    reward_manager_name = config.reward_model.get("reward_manager", "naive")
+    if reward_manager is not None:
+        reward_manager_cls = reward_manager
+    elif reward_manager_name == 'naive':
         from verl.workers.reward_manager import NaiveRewardManager
         reward_manager_cls = NaiveRewardManager
     elif reward_manager_name == 'prime':

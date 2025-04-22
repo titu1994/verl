@@ -27,6 +27,46 @@ from verl.utils.model import compute_position_id_with_mask
 import verl.utils.torch_functional as verl_F
 
 
+def apply_prompt_config(prompt_config, prompt_template, tokenizer):
+    def apply_prompt_config(row_dict: dict):
+        new_data = {}
+        testtype = row_dict.get('testtype', None)
+        new_data = format_prompt_config(prompt_config, row_dict)
+        messages = []
+
+        if 'prefix' in new_data:
+            prompt = f"{tokenizer.bos_token}{new_data['prefix']} "
+        else: 
+            if 'system' in new_data:
+                system = new_data['system']
+                messages.append({'role': 'system', 'content': system})
+            if 'user' in new_data:
+                user = new_data['user']
+                if (testtype is not None) and (new_data.get('user_addendum', {}).get(testtype, '') != ''):
+                    user = f"{user}\n\n{new_data['user_addendum'][testtype]}"
+                messages.append({'role': 'user', 'content': user})
+            if 'assistant' in new_data:
+                messages.append({'role': 'assistant', 'content': new_data['assistant']})
+
+            prompt = f"{prompt_template['text_begin']}"
+            for i, message in enumerate(messages):
+                begin = prompt_template[f"{message['role']}_begin"]
+                end = prompt_template[f"{message['role']}_end"]
+                prompt += f"{begin}{message['content']}"
+                if (i < len(messages) - 1) or (message['role'] != 'assistant'):
+                    prompt += f"{end}\n"
+            if messages[-1]['role'] != 'assistant':
+                begin = prompt_template['assistant_begin']
+                prompt += f"{begin}"
+        return prompt
+    return apply_prompt_config
+
+def apply_tags(prompt_config, tag_name):
+    def apply_tags(row_dict: dict):
+        return prompt_config[tag_name]
+    return apply_tags
+
+
 def collate_fn(data_list: list[dict]) -> dict:
     tensors = {}
     non_tensors = {}
@@ -54,6 +94,25 @@ def collate_fn(data_list: list[dict]) -> dict:
     return output
 
 
+def read_jsonl_as_dataframe(jsonl_file: str) -> pd.DataFrame:
+    d = {}
+    with open(jsonl_file, 'r') as f:
+        for line in f:
+            line = json.loads(line)
+            for k in line:
+                if k not in d:
+                    d[k] = []
+    with open(jsonl_file, 'r') as f:
+        for line in f:
+            line = json.loads(line)
+            for k in d:
+                if k in line:
+                    d[k].append(line[k])
+                else:
+                    d[k].append(None)
+    return pd.DataFrame(d)
+
+
 class RLHFDataset(Dataset):
     """
     We assume the dataset contains a column that contains prompts and other information
@@ -69,9 +128,13 @@ class RLHFDataset(Dataset):
                  chat_template_func=None,
                  return_raw_chat=False,
                  disable_chat_template=True,
-                 truncation='error'):
+                 truncation='error',
+                 prompt_config_files=None,
+                 prompt_template_file=None):
         if not isinstance(parquet_files, (List, ListConfig)):
             parquet_files = [parquet_files]
+        if not isinstance(prompt_config_files, (List, ListConfig)):
+            prompt_config_files = [prompt_config_files]
 
         self.parquet_files = copy.deepcopy(parquet_files)
         self.original_parquet_files = copy.deepcopy(parquet_files)  # use for resume
@@ -86,6 +149,23 @@ class RLHFDataset(Dataset):
         self.chat_template_func = chat_template_func
         self.truncation = truncation
         self.disable_chat_template = disable_chat_template
+        self.stop_phrases = []
+
+        if prompt_config_files is not None:
+            self.disable_chat_template = True # We already apply chat template using prompt template file
+            assert prompt_template_file is not None, "Prompt template file is required when prompt config file is provided"
+            assert os.path.exists(prompt_template_file), f"Prompt template file {prompt_template_file} does not exist"
+            assert prompt_template_file.endswith('.yaml'), f"Prompt template file {prompt_template_file} must be a yaml file"
+            self.prompt_configs = []
+            for prompt_config_file in prompt_config_files:
+                assert os.path.exists(prompt_config_file), f"Prompt config file {prompt_config_file} does not exist"
+                assert prompt_config_file.endswith('.yaml'), f"Prompt config file {prompt_config_file} must be a yaml file"
+                with open(prompt_config_file, 'r') as f:
+                    self.prompt_configs.append(yaml.safe_load(f))
+            with open(prompt_template_file, 'r') as f:
+                self.prompt_template = yaml.safe_load(f)
+            self.stop_phrases = [self.tokenizer.encode(phrase, add_special_tokens=False) for phrase in self.prompt_template['stop_phrases']]
+
 
         # whether to store the dataset in state_dict()
         # default not store
@@ -103,15 +183,36 @@ class RLHFDataset(Dataset):
         dataframes = []
         for parquet_file in self.parquet_files:
             # read parquet files and cache
-            dataframe = pd.read_parquet(parquet_file)
+            if parquet_file.endswith('.parquet'):
+                dataframe = pd.read_parquet(parquet_file)
+            elif parquet_file.endswith('.jsonl'):
+                dataframe = pd.read_json(parquet_file, lines=True)
+            else:
+                raise ValueError(f'Unsupported file type: {parquet_file}')
             dataframes.append(dataframe)
-        self.dataframe = pd.concat(dataframes)
 
+        tokenizer = self.tokenizer
+        prompt_key = self.prompt_key
+
+        if self.prompt_configs is not None:
+            for i in range(len(dataframes)):
+                if len(self.prompt_configs) > 1:
+                    assert len(self.prompt_configs) == len(dataframes), f"Number of prompt configs {len(self.prompt_configs)} must be equal to number of dataframes {len(dataframes)}"
+                    dataframes[i][prompt_key] = dataframes[i].apply(apply_prompt_config(self.prompt_configs[i], self.prompt_template, tokenizer), axis=1)
+                    dataframes[i]['think_tag'] = dataframes[i].apply(apply_tags(self.prompt_configs[i], 'think_tag'), axis=1)
+                    dataframes[i]['answer_tag'] = dataframes[i].apply(apply_tags(self.prompt_configs[i], 'answer_tag'), axis=1)
+                else:
+                    dataframes[i][prompt_key] = dataframes[i].apply(apply_prompt_config(self.prompt_configs[0], self.prompt_template, tokenizer), axis=1)
+                    dataframes[i]['think_tag'] = dataframes[i].apply(apply_tags(self.prompt_configs[0], 'think_tag'), axis=1)
+                    dataframes[i]['answer_tag'] = dataframes[i].apply(apply_tags(self.prompt_configs[0], 'answer_tag'), axis=1)
+
+        self.dataframe = pd.concat(dataframes)
+        stop_phrases = self.stop_phrases + ([[self.tokenizer.eos_token_id]] if self.tokenizer.eos_token_id not in self.stop_phrases else [])
+        stop_phrases = [stop_phrases for _ in range(len(self.dataframe))]
+        self.dataframe['stop_phrases'] = stop_phrases
         print(f'original dataset len: {len(self.dataframe)}')
 
         # filter out too long prompts
-        tokenizer = self.tokenizer
-        prompt_key = self.prompt_key
         tokenize_fn = lambda doc: tokenizer.encode(doc[prompt_key]) if self.disable_chat_template else tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True)
         if self.filter_prompts:
             self.dataframe = self.dataframe[self.dataframe.apply(lambda doc: len(

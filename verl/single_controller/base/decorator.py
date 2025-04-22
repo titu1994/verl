@@ -140,6 +140,8 @@ def _concat_data_proto_or_future(output: List):
         return DataProto.concat(output)
     elif isinstance(o, ray.ObjectRef):
         return DataProtoFuture.concat(output)
+    elif isinstance(o, list):
+        return [inner_item for inner_list in output for inner_item in inner_list]
     else:
         raise NotImplementedError
 

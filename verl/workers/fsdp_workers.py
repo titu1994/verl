@@ -40,6 +40,8 @@ from verl.utils.flops_counter import FlopsCounter
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 
+from verl.utils.reward_score.custom.code_sandbox_reward import compute_single_item_score
+
 from codetiming import Timer
 
 logger = logging.getLogger(__file__)
@@ -538,6 +540,39 @@ class ActorRolloutRefWorker(Worker):
         torch.cuda.empty_cache()
         log_gpu_memory_usage('After recompute log prob', logger=logger)
         return output
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def compute_score(
+        self,
+        data,
+    ):
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        results = []
+        with ThreadPoolExecutor() as executor:
+            # Submit one task per data item
+            futures = []
+            for i in range(len(data)):
+                batch = data[i].batch
+                prompt_len = batch['prompts'].shape[-1]
+                valid_resp_len = batch['attention_mask'][prompt_len:].sum()
+                valid_resp_ids = batch['responses'][:valid_resp_len]
+
+                futures.append(
+                    executor.submit(
+                        compute_single_item_score,
+                        valid_resp_ids,
+                        self.tokenizer,
+                        non_tensor_datum=data[i].non_tensor_batch,
+                        config=data.meta_info['config'],
+                        event=data.meta_info['event'],
+                    )
+                )
+
+            # Read results off the futures as they complete
+            for fut in as_completed(futures):
+                results.append(fut.result())
+
+        return results
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_prob(self, data: DataProto):
