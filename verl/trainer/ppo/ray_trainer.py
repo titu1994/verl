@@ -1202,7 +1202,7 @@ class RayPPOTrainer(object):
 
         num_sandboxes = self.config.trainer.nnodes
         ngpus = self.config.trainer.n_gpus_per_node
-        max_concurrency_per_sandbox = max(self.config.reward_model.reward_fn_args.get('concurrency_per_sandbox', 256), ngpus)
+        max_concurrency_per_sandbox = max(self.config.reward_model.code.get('concurrency_per_sandbox', 64), ngpus)
         num_items_per_gpu = len(batch_padded) // world_size
         max_concurrent_per_gpu = max_concurrency_per_sandbox // ngpus
 
@@ -1224,6 +1224,8 @@ class RayPPOTrainer(object):
         if pad_size > 0:
             item_results = item_results[:-pad_size]
 
+        print('MMM1', item_results)
+
         if event != 'val':
             ret = self.reward_fn(
                 batch,
@@ -1232,12 +1234,9 @@ class RayPPOTrainer(object):
                 epoch=epoch,
                 batch_index=batch_index,
                 config=self.config, 
-                ref_policy=self.ref_policy_wg if self.config.reward_model.logprob_reward_coef > 0 else None,
                 return_reward_only=False,
-                logprob_reward_coef=self.config.reward_model.logprob_reward_coef,
             )
             reward_tensor, \
-            group_reward_tensor, \
             pass_tensor, \
             all_num_non_reasoning_tokens, \
             response_num_pad_tokens, \
@@ -1247,7 +1246,6 @@ class RayPPOTrainer(object):
             batch.batch['all_num_non_reasoning_tokens'] = all_num_non_reasoning_tokens
             batch.batch['response_num_pad_tokens'] = response_num_pad_tokens
             batch.batch['prompt_num_pad_tokens'] = prompt_num_pad_tokens
-            batch.batch['group_reward_tensor'] = group_reward_tensor
             batch.batch['pass_tensor'] = pass_tensor
 
             assert reward_tensor.shape[0] == len(reward_fn_metrics), f'{reward_tensor.shape} vs {len(reward_fn_metrics)}'
@@ -1311,6 +1309,7 @@ class RayPPOTrainer(object):
         self.timeout.start_iterations()
         for epoch in range(self.config.trainer.total_epochs):
             for i_batch, batch_dict in enumerate(self.train_dataloader):
+                print('MMM1', epoch, i_batch)
                 metrics = {}
 
                 new_batch: DataProto = DataProto.from_single_dict(batch_dict)
@@ -1366,16 +1365,15 @@ class RayPPOTrainer(object):
                             reward_tensor = self.rm_wg.compute_rm_score(new_batch)
                             new_batch = new_batch.union(reward_tensor)
 
-                        if getattr(self.val_reward_fn, 'name', None) == 'code_sandbox_reward':
+                        # we combine with rule-based rm
+                        reward_extra_infos_dict: dict[str, list] = {}
+
+                        if self.config.reward_model.reward_manager.name == 'code_sandbox_reward':
                             reward_tensor, \
-                            reward_fn_metrics = self.compute_reward(batch, event='rollout', epoch=epoch, batch_index=i_batch, return_reward_only=False)
+                            reward_fn_metrics = self.compute_reward(new_batch, event='rollout', epoch=epoch, batch_index=i_batch, return_reward_only=False)
                             reward_fn_metrics = collect_reward_fn_metrics(reward_fn_metrics, reduction='mean')
-                            
-                            batch.batch['token_level_scores'] = reward_tensor
                             metrics.update(reward_fn_metrics)
                         else:
-                            # we combine with rule-based rm
-                            reward_extra_infos_dict: dict[str, list]
                             try:
                                 reward_result = self.reward_fn(new_batch, return_dict=True)
                                 reward_tensor = reward_result['reward_tensor']
@@ -1386,13 +1384,13 @@ class RayPPOTrainer(object):
                                 reward_tensor = self.reward_fn(new_batch)
                                 reward_extra_infos_dict = {}
 
-                            new_batch.batch['token_level_scores'] = reward_tensor
+                        new_batch.batch['token_level_scores'] = reward_tensor
 
-                            print(f'{list(reward_extra_infos_dict.keys())=}')
-                            if reward_extra_infos_dict:
-                                new_batch.non_tensor_batch.update({
-                                    k: np.array(v) for k, v in reward_extra_infos_dict.items()
-                                })
+                        print(f'{list(reward_extra_infos_dict.keys())=}')
+                        if len(reward_extra_infos_dict) > 0:
+                            new_batch.non_tensor_batch.update({
+                                k: np.array(v) for k, v in reward_extra_infos_dict.items()
+                            })
 
                         # compute rewards. apply_kl_penalty if available
                         if not self.config.actor_rollout_ref.actor.get('use_kl_loss', False):

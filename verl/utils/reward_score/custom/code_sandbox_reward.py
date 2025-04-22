@@ -302,47 +302,6 @@ def strip_string(string):
     string = fix_a_slash_b(string)
     return string
 
-def process_answer_tags(
-    tokenizer,
-    response_token_ids,
-    answer_tag: str,
-):
-    start_answer_idx = 0
-    answer_len = len(response_token_ids)
-    extra_length = 0
-
-    formatting = {'answer_open_count': None, 'answer_close_count': None, 'answer_len': None}
-    if answer_tag == "":
-        return start_answer_idx, answer_len, formatting
-    
-    open_tag_token_ids = tokenizer.encode(f'<{answer_tag}>', add_special_tokens=False)
-    close_tag_token_ids = tokenizer.encode(f'</{answer_tag}>', add_special_tokens=False)
-
-    answer_open_count = count_sublist(response_token_ids, open_tag_token_ids)
-    answer_close_count = count_sublist(response_token_ids, close_tag_token_ids)
-
-    temp = tokenizer.decode(response_token_ids)
-    assert answer_open_count == temp.count(f'<{answer_tag}>'), (
-        f"Answer open count mismatch {answer_open_count} != {temp.count(f'<{answer_tag}>')}\n\n"
-        f"text: {temp}\n\nopen_tag_token_ids: {open_tag_token_ids}\n\n"
-        f"response_token_ids: {response_token_ids}"
-    )
-
-    formatting['answer_open_count'] = answer_open_count
-    formatting['answer_close_count'] = answer_close_count
-
-    if answer_open_count == 1:
-        start_answer_idx = find_sublist(response_token_ids, open_tag_token_ids) + len(open_tag_token_ids)
-        end_answer_idx = rfind_sublist(response_token_ids, close_tag_token_ids)
-        if end_answer_idx == -1:
-            end_answer_idx = len(response_token_ids)
-        else:
-            extra_length = len(response_token_ids) - (end_answer_idx + len(close_tag_token_ids))
-        answer_len = end_answer_idx - start_answer_idx
-        formatting['answer_len'] = answer_len
-
-    return start_answer_idx, answer_len, formatting
-
 def process_think_tags(
     tokenizer,
     response_token_ids,
@@ -427,103 +386,64 @@ def execute_stdin_tests(
 
     return correct_list
 
-def dco_factor(n, N):
-    p = n / N
-    return N*((1-p)**(N-1)) * p/(1-(1-p)**N)
-
-def compute_reward(config, problem_type, all_formatting, all_correct_lists, all_num_reasoning_tokens, all_num_non_reasoning_tokens, event):
+def compute_reward(config, all_formatting, all_correct_lists, all_num_reasoning_tokens, all_num_non_reasoning_tokens, event):
     n = len(all_correct_lists)
     assert len(all_num_reasoning_tokens) == n
     assert len(all_num_non_reasoning_tokens) == n
     assert n > 0
 
-    reward_fn_args = config.reward_model.get('reward_fn_args', {})
-    code_reward_args = reward_fn_args.get('code', {})
-    code_policy = code_reward_args.get('verifier_reward', 'fractional')
-    group_policy = code_reward_args.get('verifier_group_reward', 'pass@1')
+    code_args = config.reward_model.get('code', {})
+    code_policy = code_args.get('reward_type', 'fractional')
 
-    unused_reasoning_penalty = reward_fn_args['penalties']['unused_reasoning']
     overlong_buffer_cfg = config.reward_model.reward_manager.overlong_buffer
+    overlong_enable = overlong_buffer_cfg.enable
     overlong_len_threshold = overlong_buffer_cfg.len
-    overlong_penalty_factor = overlong_buffer_cfg.penalty_factor
-    max_gen_len = config.data.max_response_length
+    overlong_penalty_factor = overlong_buffer_cfg.penalty_factor if overlong_enable else 0.0
 
-    group_rewards = [0.] * n
     all_penalties = []
     for i in range(n):
         penalty = 0.0
         if event != 'val':
             for k, v in all_formatting.items():
-                factor = config.reward_model['reward_fn_args']['penalties'].get(k, 0.0)
+                factor = code_args.get('penalties', {}).get(k, 0.0)
                 if v[i] is None:
                     continue
-                if k in ['code_fence_missing', 'math_box_missing']:
+                if k in ['code_fence_missing']:
                     if v[i]:
                         penalty += factor
                 elif k in ['ends_with_stop_phrase']:
                     if not v[i]:
                         penalty += factor
-                elif k in ['think_open_count']:
-                    if v[i] > 0:
-                        penalty += factor
-                elif k in ['think_close_count', 'answer_open_count', 'answer_close_count']:
+                elif k in ['think_close_count']:
                     if v[i] != 1:
-                        penalty += factor
-                elif k in ['answer_len']:
-                    if v[i] == 0:
                         penalty += factor
         all_penalties.append(penalty)
 
-    if problem_type == 'math':
-        # each item_result has correct_list => single item [0 or 1 or -1 => mapped to pass/fail].
-        pass_results = [arr[0] for arr in all_correct_lists]
-        rewards = [float(c) for c in pass_results]  # e.g. 0 or 1
-        rewards = [c - p for c, p in zip(rewards, all_penalties)]
-        pass_or_not = pass_results
-    elif problem_type == 'code':
-        pass_or_not = []
-        for c in all_correct_lists:
-            # c is list[bool], pass if all True
-            passed = bool(np.all(c))
-            pass_or_not.append(passed)
+    pass_or_not = []
+    for c in all_correct_lists:
+        # c is list[bool], pass if all True
+        passed = bool(np.all(c))
+        pass_or_not.append(passed)
 
-        if event != 'val':
-            unused_reasoning = [
-                (max_gen_len - (all_num_reasoning_tokens[i] + all_num_non_reasoning_tokens[i])) / max_gen_len
-                for i in range(n)
-            ]
-            overthreshold_answer = [
-                max(0, (all_num_reasoning_tokens[i] + all_num_non_reasoning_tokens[i] - overlong_len_threshold) / overlong_len_threshold)
-                for i in range(n)
-            ]
-            overthreshold_answer_penalty = [overthreshold_answer[i] * overlong_penalty_factor for i in range(n)]
-            unused_reasoning_penalty_vals = [unused_reasoning[i] * unused_reasoning_penalty for i in range(n)]
-            all_penalties = [p + u + o for p, u, o in zip(all_penalties, unused_reasoning_penalty_vals, overthreshold_answer_penalty)]
+    if event != 'val':
+        overthreshold_answer = [
+            max(0, (all_num_reasoning_tokens[i] + all_num_non_reasoning_tokens[i] - overlong_len_threshold) / overlong_len_threshold)
+            for i in range(n)
+        ]
+        overthreshold_answer_penalty = [overthreshold_answer[i] * overlong_penalty_factor for i in range(n)]
+        all_penalties = [p + o for p, o in zip(all_penalties, overthreshold_answer_penalty)]
 
-        if (code_policy == 'pass@1') or (event == 'val'):
-            pass_or_not_float = [float(x) for x in pass_or_not]
-            rewards = [-p if p > 0 else c for c, p in zip(pass_or_not_float, all_penalties)]
-        elif code_policy == 'fractional':
-            fraction_correct = [float(np.mean(c)) for c in all_correct_lists]
-            rewards = [-p if p > 0 else c for c, p in zip(fraction_correct, all_penalties)]
-        else:
-            raise ValueError(f"Unsupported code policy: {code_policy}")
+    if (code_policy == 'pass@1') or (event == 'val'):
+        pass_or_not_float = [float(x) for x in pass_or_not]
+        rewards = [-p if p > 0 else c for c, p in zip(pass_or_not_float, all_penalties)]
+    elif code_policy == 'fractional':
+        fraction_correct = [float(np.mean(c)) for c in all_correct_lists]
+        rewards = [-p if p > 0 else c for c, p in zip(fraction_correct, all_penalties)]
     else:
-        raise ValueError(f"Unsupported problem type: {problem_type}")
+        raise ValueError(f"Unsupported code policy: {code_policy}")
 
     group_pass_count = sum(int(k) for k in pass_or_not)
     group_pass_or_not = (group_pass_count > 0)
-
-    if group_policy == 'pass@n':
-        group_rewards = [float(group_pass_or_not)] * n
-    elif group_policy == 'dco':
-        if group_pass_or_not:
-            factor = dco_factor(group_pass_count, n)
-            rewards = [factor * r if r > 0 else r for r in rewards]
-    elif group_policy == 'pass@1':
-        pass
-    else:
-        raise ValueError(f"Unsupported group policy: {group_policy}")
 
     rewards = [float(x) for x in rewards]
 
@@ -533,7 +453,7 @@ def compute_reward(config, problem_type, all_formatting, all_correct_lists, all_
         for i in range(n):
             all_specific_penalties[i][k] = all_formatting[k][i]
 
-    return rewards, group_rewards, pass_or_not, group_pass_or_not, all_specific_penalties
+    return rewards, pass_or_not, group_pass_or_not, all_specific_penalties
 
 def convert_functional_tests_to_asserts(func_name, tests):
     unit_tests = []
@@ -621,7 +541,6 @@ def compute_single_item_score(
     config: dict,
     event: str | None = None,
     sandbox=None,
-    continuous=False,
 ):
     """
     Evaluate correctness for a single item, returning:
@@ -637,12 +556,8 @@ def compute_single_item_score(
     correct_list = []
 
     think_tag = non_tensor_datum['think_tag']
-    answer_tag = non_tensor_datum['answer_tag']
     stop_phrases = non_tensor_datum['stop_phrases']
     max_tokens = config.data.max_response_length
-    problem_type = non_tensor_datum['problemtype']
-
-    write_content = []
 
     # 1) Reasoning split
     if think_tag == '':
@@ -666,69 +581,55 @@ def compute_single_item_score(
         response_token_ids[-len(p):] == p for p in stop_phrases
     )
 
-    # 3) answer-tag
     resp_after_think = response_token_ids[post_think_token_idx:]
-    ans_start, ans_len, ans_fmt = process_answer_tags(tokenizer, resp_after_think, answer_tag)
-    formatting.update(ans_fmt)
-
-    if ans_len > 0:
-        resp_after_think = resp_after_think[ans_start : ans_start + ans_len]
-
     response_text = tokenizer.decode(resp_after_think, skip_special_tokens=False)
 
     # 4) correctness
-    if problem_type == 'math':
-        expected = non_tensor_datum.get('expected_answer')
-        res, _ = compute_math_score(response_text, expected, box_strict=True)
-        formatting['math_box_missing'] = (res == -1.0)
-        correct_list.append(int(res == 1.0))
+    language = non_tensor_datum.get('language', 'python')
+    # code_block = re.search(r'```(.*?)```', response_text, re.DOTALL)
+    code_block = re.findall(r'```(.*?)```', response_text, re.DOTALL)
 
-    else:  # code
-        language = non_tensor_datum.get('language', 'python')
-        # code_block = re.search(r'```(.*?)```', response_text, re.DOTALL)
-        code_block = re.findall(r'```(.*?)```', response_text, re.DOTALL)
+    if not code_block:
+        solution = response_text
+        formatting['code_fence_missing'] = True
+    else:
+        #solution = code_block.group(1)
+        solution = code_block[-1]
+        formatting['code_fence_missing'] = False
+        num_reasoning_tokens, num_non_reasoning_tokens = get_num_reasoning_tokens(response_token_ids, '```', solution, tokenizer, language)
 
-        if not code_block:
-            solution = response_text
-            formatting['code_fence_missing'] = True
-        else:
-            #solution = code_block.group(1)
-            solution = code_block[-1]
-            formatting['code_fence_missing'] = False
-            num_reasoning_tokens, num_non_reasoning_tokens = get_num_reasoning_tokens(response_token_ids, '```', solution, tokenizer, language)
+    code_cfg = config.reward_model.get('reward_model', {}).get('code', {})
+    tests_used = code_cfg.get('unit_tests_to_use', ['public', 'private', 'generated'])
 
-        code_cfg = config.reward_model.get('reward_fn_args', {}).get('code', {})
-        tests_used = code_cfg.get('unit_tests_to_use', ['public', 'private', 'generated'])
+    all_tests = {
+        'public'   : non_tensor_datum['public_test_cases'],
+        'private'  : non_tensor_datum['private_test_cases'],
+        'generated': non_tensor_datum['generated_test_cases']
+    }
+    tests = {k: v for k, v in all_tests.items() if k in tests_used}
 
-        all_tests = {
-            'public'   : non_tensor_datum['public_test_cases'],
-            'private'  : non_tensor_datum['private_test_cases'],
-            'generated': non_tensor_datum['generated_test_cases']
-        }
-        tests = {k: v for k, v in all_tests.items() if k in tests_used}
+    solution = remove_code_fence(language, solution)
+    num_max_tests = code_cfg.get('max_train_unit_tests', 10) if event != 'val' else 10000
+    timeout = code_cfg.get('timeout', 5)
 
-        solution = remove_code_fence(language, solution)
-        num_max_tests = code_cfg.get('limit_tests', 10) if event != 'val' else 10000
-        timeout = code_cfg.get('timeout', 1.0)
-        test_type = non_tensor_datum['testtype']
+    if sandbox is None:
+        # fallback
+        sandbox = get_sandbox('fast')
 
-        if sandbox is None:
-            # fallback
-            sandbox = get_sandbox('fast')
+    test_type = non_tensor_datum['testtype']
+    fn_name = non_tensor_datum.get('metadata', {}).get('func_name', None)
+    assert test_type == 'stdin' or fn_name is not None, "fn_name is required for non-stdin tests"
+    assert fn_name is None or test_type == 'functional', "fn_name is only supported for functional tests"
 
-        fn_name = non_tensor_datum.get('metadata', {}).get('func_name', None)
-        assert test_type == 'stdin' or fn_name is not None, "fn_name is required for non-stdin tests"
-        assert fn_name is None or test_type == 'functional', "fn_name is only supported for functional tests"
-
-        correct_list = execute_via_sandbox(
-            solution, 
-            tests, 
-            num_max_tests, 
-            sandbox, 
-            timeout, 
-            language, 
-            fn_name=fn_name,
-        )
+    correct_list = execute_via_sandbox(
+        solution, 
+        tests, 
+        num_max_tests, 
+        sandbox, 
+        timeout, 
+        language, 
+        fn_name=fn_name,
+    )
 
     return {
         'correct_list': correct_list,
@@ -747,7 +648,7 @@ def compute_item_results(data, tokenizer, config, event):
 
     item_results = [None] * len(data)
 
-    continuous = config.reward_model.reward_fn_args.code.get('verifier_reward', 'fractional') == 'fractional'
+    continuous = config.reward_model.code.get('reward_type', 'fractional') == 'fractional'
     if event == 'val':
         continuous = False
 
@@ -785,7 +686,7 @@ def compute_item_results(data, tokenizer, config, event):
 # Post-exec aggregator (unchanged)
 ############################################################
 
-def compute_score_post_exec(item_results, problem_type, event, config):
+def compute_score_post_exec(item_results, event, config):
     all_correct_lists = []
     all_num_reasoning_tokens = []
     all_num_non_reasoning_tokens = []
@@ -800,13 +701,11 @@ def compute_score_post_exec(item_results, problem_type, event, config):
 
     (
         rewards, 
-        group_rewards, 
         pass_or_not, 
         group_pass_or_not, 
         all_specific_penalties
     ) = compute_reward(
         config=config,
-        problem_type=problem_type,
         all_formatting=all_formatting,
         all_correct_lists=all_correct_lists,
         all_num_reasoning_tokens=all_num_reasoning_tokens,
@@ -817,7 +716,6 @@ def compute_score_post_exec(item_results, problem_type, event, config):
     # shape: item_results is same length as all lists
     return (
         rewards, 
-        group_rewards, 
         pass_or_not, 
         group_pass_or_not, 
         all_num_non_reasoning_tokens, 
@@ -862,17 +760,15 @@ def _process_group(args):
         write_content['responses'].append({'response': resp_str})
 
     item_results_group = [item_results[i] for i in group_idxes]
-    problem_type = group_items[0].non_tensor_batch['problemtype']
 
     (
         rewards,
-        group_rewards,
         pass_or_not,
         group_pass_or_not,
         num_non_reasoning_tokens,
         all_penalties,
         all_formatting,
-    ) = compute_score_post_exec(item_results_group, problem_type, event, config)
+    ) = compute_score_post_exec(item_results_group, event, config)
 
     for i, _ in enumerate(group_items):
         write_content['responses'][i]['reward'] = rewards[i]
@@ -894,7 +790,6 @@ def _process_group(args):
         uid,
         group_idxes,
         rewards,
-        group_rewards,
         pass_or_not,
         num_non_reasoning_tokens,
         response_num_pad_tokens_loc,
@@ -905,52 +800,6 @@ def _process_group(args):
     )
 
 
-def expand_slurm_nodelist(nodelist):
-    """
-    Turn a SLURM_JOB_NODELIST string into a list of hostnames.
-    Handles:
-      - prefix[01-03,05] style ranges
-      - simple comma‑separated entries
-      - mixed lists like a[1-2],b,c[05]
-    """
-    # 1) split on commas not inside brackets
-    tokens = []
-    buf = ""
-    depth = 0
-    for c in nodelist:
-        if c == "[":
-            depth += 1
-            buf += c
-        elif c == "]":
-            depth -= 1
-            buf += c
-        elif c == "," and depth == 0:
-            tokens.append(buf)
-            buf = ""
-        else:
-            buf += c
-    if buf:
-        tokens.append(buf)
-
-    # 2) expand each token
-    hosts = []
-    for tok in tokens:
-        m = re.match(r"^(.*?)\[(.*?)\]$", tok)
-        if m:
-            prefix, inside = m.groups()
-            for part in inside.split(","):
-                if "-" in part:
-                    start, end = part.split("-")
-                    width = max(len(start), len(end))
-                    for num in range(int(start), int(end) + 1):
-                        hosts.append(f"{prefix}{str(num).zfill(width)}")
-                else:
-                    hosts.append(f"{prefix}{part}")
-        else:
-            hosts.append(tok)
-    return hosts
-
-
 class RewardManager:
     """
     Accepts a list of hosts and a port at init, creates sandboxes.
@@ -959,8 +808,6 @@ class RewardManager:
       2. aggregate rewards with _process_group
       4. return reward_tensor or the full tuple
     """
-
-    name = 'code_sandbox_reward'
 
     def __init__(
         self,
@@ -979,15 +826,11 @@ class RewardManager:
         self.num_examine = num_examine
         self.last_epoch = None
         self.last_batch_index = None
-
-        port = 6000
-        nodelist_str = os.environ.get("SLURM_JOB_NODELIST", "")
-        hosts = expand_slurm_nodelist(nodelist_str)
-
-        # Create one sandbox per host
-        self.sandboxes = [get_sandbox(host=h, port=port, sandbox_type='fast') for h in hosts]
+        self.name = 'code_sandbox_reward'
 
     def write_generations(self, dir_path, event, data: list[dict]):
+        if dir_path.strip() == '':
+            return
         os.makedirs(dir_path, exist_ok=True)
         idx = str(uuid.uuid4())
         filepath = os.path.join(dir_path, f"{event}_{self.last_epoch}_{self.last_batch_index}_{idx}.jsonl")
@@ -1002,9 +845,7 @@ class RewardManager:
         batch_index: int | None = None,
         event: str | None = None,
         config: dict | None = None,
-        ref_policy=None,
         return_reward_only: bool = True,
-        concurrency_per_sandbox: int = 16,  # <--- new
         item_results: list[dict] | None = None,
     ):
         """
@@ -1016,16 +857,6 @@ class RewardManager:
         """
         if 'rm_scores' in data.batch.keys():
             return data.batch['rm_scores']
-
-        if item_results is None:
-            concurrency_per_sandbox = config.reward_model.reward_fn_args.get('concurrency_per_sandbox', 16)
-            item_results = self.compute_item_results(
-                data=data, 
-                config=config,
-                event=event,
-                concurrency_per_sandbox=concurrency_per_sandbox
-            )
-
 
         # 0) track epoch/batch
         self.last_epoch = epoch
@@ -1039,7 +870,6 @@ class RewardManager:
 
         # 3) Prepare reward, group_reward
         reward_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
-        group_reward_tensor = torch.zeros(reward_tensor.shape[0], device=reward_tensor.device, dtype=torch.float32)
         pass_ret = torch.zeros_like(reward_tensor)
         pass_tensor = torch.zeros(reward_tensor.shape[0], device=reward_tensor.device, dtype=torch.float32)
         prompt_pad_tokens = [None] * len(data)
@@ -1069,7 +899,6 @@ class RewardManager:
             uid,
             group_idxes,
             rewards,
-            group_rewards,
             pass_or_not,
             num_non_reasoning_tokens_list,
             response_pad_local,
@@ -1089,7 +918,6 @@ class RewardManager:
                 resp_len = item.batch['attention_mask'][prompt_len:].sum()
 
                 reward_tensor[idx, resp_len - 1] = rewards[i]
-                group_reward_tensor[idx]         = group_rewards[i]
                 pass_ret[idx, resp_len - 1]      = int(pass_or_not[i])
                 pass_tensor[idx]                 = int(pass_or_not[i])
 
@@ -1103,7 +931,7 @@ class RewardManager:
 
         # 5) optional write
         if event in ('rollout', 'val'):
-            out_dir = config.actor_rollout_ref.rollout.experience_output_dir
+            out_dir = config.actor_rollout_ref.rollout.get('experience_output_dir', '')
             self.write_generations(dir_path=out_dir, event=event, data=all_write_content)
 
         # turn them into Tensors
@@ -1126,7 +954,6 @@ class RewardManager:
 
         return (
             reward_tensor,
-            group_reward_tensor,
             pass_tensor,
             non_reasoning_tokens,
             response_pad_tokens,
