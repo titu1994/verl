@@ -600,6 +600,16 @@ class RayPPOTrainer(object):
         if not hasattr(self, 'training_table'):
             self.training_table = wandb.Table(columns=columns)
 
+        inputs = [x for x in inputs for _ in range(self.config.actor_rollout_ref.rollout.n)] # repeat for each rollout
+
+        assert len(inputs) == len(outputs) == len(rewards) # Sanity check
+
+        samples = zip(inputs, outputs, rewards)
+        samples = list(samples)
+        samples.sort(key=lambda x: x[0])  # Sort by input text
+
+        inputs, outputs, rewards = zip(*samples)
+
         new_table = wandb.Table(columns=columns, data=self.training_table.data)
         inputs = inputs[:generations_to_log]
         outputs = outputs[:generations_to_log]
