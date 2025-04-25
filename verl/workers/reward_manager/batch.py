@@ -192,6 +192,7 @@ class BatchRewardManager:
                 else:
                     print(f"[score]", score)
         all_correct_index = []
+        all_incorrect_index = []
         for index, scores in score_index.items():
             if not scores:
                 continue  # Skip empty lists
@@ -200,12 +201,14 @@ class BatchRewardManager:
             if all(score == first_value for score in scores):
                 if first_value > 0:
                     all_correct_index.append(index)  # All values are the same positive number
-
+                elif first_value < 0:
+                    all_incorrect_index.append(index)
         if return_dict:
             return {
                 "reward_tensor": reward_tensor,
                 "reward_extra_info": reward_extra_info,
                 "all_correct_index": all_correct_index,
+                "all_incorrect_index": all_incorrect_index,
             }
         else:
             return reward_tensor

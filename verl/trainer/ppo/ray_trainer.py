@@ -938,11 +938,17 @@ class RayPPOTrainer(object):
                             reward_tensor = reward_result['reward_tensor']
                             reward_extra_infos_dict = reward_result['reward_extra_info']
                             all_correct_index = reward_result['all_correct_index']
-                            file_path = os.path.join(self.config.trainer.default_local_dir,
+                            all_incorrect_index = reward_result['all_incorrect_index']
+                            all_correct_file_path = os.path.join(self.config.trainer.default_local_dir,
                                                            'all_correct_index.jsonl')
-                            os.makedirs(os.path.dirname(file_path), exist_ok=True)
-                            with open(file_path, "a", encoding="utf-8") as f:
+                            all_incorrect_file_path = os.path.join(self.config.trainer.default_local_dir,
+                                                           'all_incorrect_index.jsonl')
+                            os.makedirs(os.path.dirname(all_correct_file_path), exist_ok=True)
+                            with open(all_correct_file_path, "a", encoding="utf-8") as f:
                                 for item in all_correct_index:
+                                    f.write(json.dumps(item, ensure_ascii=False) + "\n")
+                            with open(all_incorrect_file_path, "a", encoding="utf-8") as f:
+                                for item in all_incorrect_index:
                                     f.write(json.dumps(item, ensure_ascii=False) + "\n")
                         except Exception as e:
                             print(f'Error in reward_fn: {e}')
