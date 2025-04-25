@@ -174,7 +174,7 @@ class BatchRewardManager:
 
             reward_tensor[i, valid_response_length - 1] = reward
             
-            index = extra_info[i]['index']
+            index = extra_infos[i]['index']
             score_index[index].append(reward)
             
             
