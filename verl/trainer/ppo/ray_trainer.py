@@ -45,6 +45,7 @@ from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
 from verl.utils.tracking import ValidationGenerationsLogger
 from torch.utils.data import RandomSampler, SequentialSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
+import json
 
 WorkerType = Type[Worker]
 
@@ -936,6 +937,13 @@ class RayPPOTrainer(object):
                             reward_result = self.reward_fn(new_batch, return_dict=True)
                             reward_tensor = reward_result['reward_tensor']
                             reward_extra_infos_dict = reward_result['reward_extra_info']
+                            all_correct_index = reward_result['all_correct_index']
+                            file_path = os.path.join(self.config.trainer.default_local_dir,
+                                                           'all_correct_index.jsonl')
+                            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                            with open(file_path, "a", encoding="utf-8") as f:
+                                for item in all_correct_index:
+                                    f.write(json.dumps(item, ensure_ascii=False) + "\n")
                         except Exception as e:
                             print(f'Error in reward_fn: {e}')
                             reward_tensor = self.reward_fn(new_batch)

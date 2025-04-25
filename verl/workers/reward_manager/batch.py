@@ -14,7 +14,7 @@
 
 from verl import DataProto
 from verl.utils.reward_score import _default_compute_score
-import torch
+import torch, collections
 from collections import defaultdict
 
 
@@ -95,7 +95,7 @@ class BatchRewardManager:
         solution_strs = []
         ground_truths = []
         extra_infos = []
-
+        
         for i in range(len(data)):
             data_item = data[i]  # DataProtoItem
 
@@ -134,7 +134,7 @@ class BatchRewardManager:
             ground_truth=ground_truths,
             extra_info=extra_infos,
         )
-
+        score_index = collections.defaultdict(list)    
         for i, result in enumerate(results):
             data_item = data[i]  # DataProtoItem
 
@@ -173,7 +173,11 @@ class BatchRewardManager:
                     reward_extra_info["overlong"].append(overlong_reward < 0)
 
             reward_tensor[i, valid_response_length - 1] = reward
-
+            
+            index = extra_info[i]['index']
+            score_index[index].append(reward)
+            
+            
             if data_source not in already_print_data_sources:
                 already_print_data_sources[data_source] = 0
 
@@ -187,11 +191,21 @@ class BatchRewardManager:
                         print(f"[{key}]", value)
                 else:
                     print(f"[score]", score)
+        all_correct_index = []
+        for index, scores in score_index.items():
+            if not scores:
+                continue  # Skip empty lists
+            first_value = scores[0]
+            # Check if all values in the list are the same
+            if all(score == first_value for score in scores):
+                if first_value > 0:
+                    all_correct_index.append(index)  # All values are the same positive number
 
         if return_dict:
             return {
                 "reward_tensor": reward_tensor,
                 "reward_extra_info": reward_extra_info,
+                "all_correct_index": all_correct_index,
             }
         else:
             return reward_tensor
