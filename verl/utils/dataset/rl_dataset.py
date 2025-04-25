@@ -17,16 +17,18 @@ import os
 from typing import List, Union, Optional
 import copy
 import pandas as pd
+import json
 from collections import defaultdict
 
 import torch
+import string
+import yaml
 import numpy as np
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from verl.utils.model import compute_position_id_with_mask
 import verl.utils.torch_functional as verl_F
-
 
 def collate_fn(data_list: list[dict]) -> dict:
     tensors = defaultdict(list)
@@ -87,9 +89,12 @@ class RLHFDataset(Dataset):
                  filter_prompts=True,
                  cache_dir='~/.cache/verl/rlhf',
                  chat_template_func=None,
+                 disable_chat_template=True,
                  return_raw_chat=False,
                  truncation='error',
-                 filter_overlong_prompts=False):
+                 filter_overlong_prompts=False,
+                 prompt_config_files=None,
+                 prompt_template_file=None):
         if not isinstance(parquet_files, (List, ListConfig)):
             parquet_files = [parquet_files]
 
@@ -103,6 +108,7 @@ class RLHFDataset(Dataset):
         self.image_key = image_key
         self.max_prompt_length = max_prompt_length
         self.filter_prompts = filter_prompts
+        self.disable_chat_template = disable_chat_template
 
         self.return_raw_chat = return_raw_chat
         self.chat_template_func = chat_template_func
@@ -124,20 +130,27 @@ class RLHFDataset(Dataset):
     def _read_files_and_tokenize(self):
         dataframes = []
         for parquet_file in self.parquet_files:
-            # read parquet files and cache
-            dataframe = pd.read_parquet(parquet_file)
+            if parquet_file.endswith('.parquet'):
+                # read parquet files and cache
+                dataframe = pd.read_parquet(parquet_file)
+            dataframe['line_number'] = range(len(dataframe))
             dataframes.append(dataframe)
         self.dataframe = pd.concat(dataframes)
 
         print(f'dataset len: {len(self.dataframe)}')
 
+        tokenizer = self.tokenizer
+        prompt_key = self.prompt_key
+
+        self.dataframe = pd.concat(dataframes)
+        print(f'original dataset len: {len(self.dataframe)}')
+
         # filter out too long prompts
         if self.filter_overlong_prompts:
             tokenizer = self.tokenizer
             prompt_key = self.prompt_key
-            self.dataframe = self.dataframe[self.dataframe.apply(lambda doc: len(
-                tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True)) <= self.max_prompt_length,
-                                                                 axis=1)]
+            tokenize_fn = lambda doc: tokenizer.encode(doc[prompt_key]) if self.disable_chat_template else tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True)
+            self.dataframe = self.dataframe[self.dataframe.apply(lambda doc: len(tokenize_fn(doc)) <= self.max_prompt_length, axis=1)]
 
             print(f'filter dataset len: {len(self.dataframe)}')
 
@@ -161,7 +174,10 @@ class RLHFDataset(Dataset):
 
         chat = row_dict.pop(self.prompt_key)
 
-        prompt_with_chat_template = self.tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
+        if self.disable_chat_template:
+            prompt_with_chat_template = chat
+        else:
+            prompt_with_chat_template = self.tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
 
         is_multi_modal = self.image_key in row_dict
         if is_multi_modal:  # expand image token

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 from verl import DataProto
 from verl.utils.reward_score import _default_compute_score
 import torch
@@ -60,9 +61,13 @@ class BatchRewardManager:
             prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
             response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
 
-            ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
+            reward_model_data = data_item.non_tensor_batch['reward_model']
+            if type(reward_model_data) == str:
+                ground_truth = reward_model_data
+            else:
+                ground_truth = reward_model_data['ground_truth']
 
-            data_source = data_item.non_tensor_batch[self.reward_fn_key]
+            data_source = data_item.non_tensor_batch.get(self.reward_fn_key, 'unknown')
 
             extra_info = data_item.non_tensor_batch.get('extra_info', None)
 
@@ -113,12 +118,19 @@ class BatchRewardManager:
             # decode
             prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
             response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
+
+            # print('prompt:', prompt_str, '; response:', response_str)
             eos_token = self.tokenizer.eos_token
             if response_str.endswith(eos_token):
                 response_str = response_str[:-len(eos_token)]
 
-            ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
+            reward_model_data = data_item.non_tensor_batch['reward_model']
+            if type(reward_model_data) == str:
+                ground_truth = reward_model_data
+            else:
+                ground_truth = reward_model_data['ground_truth']
 
+            assert self.reward_fn_key in data_item.non_tensor_batch, data_item.non_tensor_batch.keys()
             data_source = data_item.non_tensor_batch[self.reward_fn_key]
 
             extra_info = data_item.non_tensor_batch.get('extra_info', None)
@@ -181,7 +193,7 @@ class BatchRewardManager:
                 already_print_data_sources[data_source] += 1
                 print("[prompt]", prompt_str)
                 print("[response]", response_str)
-                print("[ground_truth]", ground_truth)
+                # print("[ground_truth]", ground_truth)
                 if isinstance(result, dict):
                     for key, value in result.items():
                         print(f"[{key}]", value)

@@ -18,7 +18,56 @@ from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 
 import os
 import ray
+import json
 import hydra
+
+def sandbox_code_compute_score(data_source, solution_str, ground_truth, extra_info=None):
+    import re
+    from verl.utils.reward_score.nemo_code.code_sandbox_reward import remove_code_fence, execute_via_sandbox
+
+    solution_strs = solution_str
+    ground_truths = ground_truth
+
+    results = []
+    for solution_str, ground_truth in zip(solution_strs, ground_truths):
+        non_tensor_datum = json.loads(ground_truth)
+        language = non_tensor_datum.get('language', 'python')
+        code_block = re.findall(r'```(.*?)```', solution_str, re.DOTALL)
+        if not code_block:
+            solution = solution_str
+        else:
+            solution = code_block[-1]
+        assert 'ground_truth' in non_tensor_datum, non_tensor_datum.keys()
+        tests = non_tensor_datum['ground_truth']
+        solution = remove_code_fence(language, solution)
+        test_type = non_tensor_datum['testtype']
+        num_max_tests = 10
+        timeout = 5.0
+        sandbox = None
+        metadata = {}
+        if 'metadata' in non_tensor_datum:
+            metadata = json.loads(non_tensor_datum['metadata'])
+        fn_name = metadata.get('func_name', None)
+
+        correct_list = execute_via_sandbox(
+            solution, 
+            tests,
+            num_max_tests, 
+            sandbox, 
+            timeout, 
+            language, 
+            fn_name=fn_name,
+        )
+
+        correct = all(correct_list)
+        acc = float(correct)
+        reward = 1.0 if correct else 0.0
+        results.append({
+            'score': reward,
+            'acc': acc,
+            'pred': solution,
+        })
+    return results
 
 def sandbox_compute_score(data_source, solution_str, ground_truth, extra_info=None):
     from nemo_skills.code_execution.sandbox import LocalSandbox
