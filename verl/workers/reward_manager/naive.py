@@ -90,7 +90,8 @@ class NaiveRewardManager:
         reward_extra_info = defaultdict(list)
 
         already_print_data_sources = {}
-
+        
+        score_index = collections.defaultdict(list)    
         for i in range(len(data)):
             data_item = data[i]  # DataProtoItem
 
@@ -149,6 +150,9 @@ class NaiveRewardManager:
 
             reward_tensor[i, valid_response_length - 1] = reward
 
+            index = extra_info['index']
+            score_index[index].append(reward)
+            
             if data_source not in already_print_data_sources:
                 already_print_data_sources[data_source] = 0
 
@@ -163,10 +167,25 @@ class NaiveRewardManager:
                 else:
                     print(f"[score]", score)
 
+        all_correct_index = []
+        all_incorrect_index = []
+        for index, scores in score_index.items():
+            if not scores:
+                continue  # Skip empty lists
+            first_value = scores[0]
+            # Check if all values in the list are the same
+            if all(score == first_value for score in scores):
+                if first_value > 0:
+                    all_correct_index.append(index)  # All values are the same positive number
+                elif first_value < 0:
+                    all_incorrect_index.append(index)
+        
         if return_dict:
             return {
                 "reward_tensor": reward_tensor,
                 "reward_extra_info": reward_extra_info,
+                "all_correct_index": all_correct_index,
+                "all_incorrect_index": all_incorrect_index,
             }
         else:
             return reward_tensor
