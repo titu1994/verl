@@ -140,6 +140,8 @@ def _concat_data_proto_or_future(output: List):
         return DataProto.concat(output)
     elif isinstance(o, ray.ObjectRef):
         return DataProtoFuture.concat(output)
+    elif isinstance(o, list):
+        return [inner_item for inner_list in output for inner_item in inner_list]
     else:
         raise NotImplementedError
 
@@ -291,7 +293,7 @@ def collect_dp_compute_data_proto(worker_group, output):
     import ray
 
     for o in output:
-        assert isinstance(o, (DataProto, ray.ObjectRef)), f"expecting {o} to be DataProto, but got {type(o)}"
+        assert isinstance(o, (DataProto, ray.ObjectRef, list)), f"expecting {o} to be DataProto, but got {type(o)}"
 
     output = collect_dp_compute(worker_group, output)
     return _concat_data_proto_or_future(output)

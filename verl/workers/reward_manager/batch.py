@@ -16,6 +16,7 @@ import json
 from verl import DataProto
 from verl.utils.reward_score import _default_compute_score
 import torch
+import numpy as np
 from collections import defaultdict
 
 
@@ -42,6 +43,7 @@ class BatchRewardManager:
 
     # TODO: Is this still necessary in algorithms other than PRIME?
     def verify(self, data):
+        assert False
         scores = []
         for i in range(len(data)):
             data_item = data[i]  # DataProtoItem
@@ -96,7 +98,7 @@ class BatchRewardManager:
 
         already_print_data_sources = {}
 
-        data_sources =[]
+        data_sources = []
         solution_strs = []
         ground_truths = []
         extra_infos = []
@@ -125,15 +127,18 @@ class BatchRewardManager:
                 response_str = response_str[:-len(eos_token)]
 
             reward_model_data = data_item.non_tensor_batch['reward_model']
-            if type(reward_model_data) == str:
-                ground_truth = reward_model_data
-            else:
+            if type(reward_model_data) == dict:
                 ground_truth = reward_model_data['ground_truth']
+            else:
+                reward_model_data = str(reward_model_data)
+                ground_truth = reward_model_data
 
             assert self.reward_fn_key in data_item.non_tensor_batch, data_item.non_tensor_batch.keys()
             data_source = data_item.non_tensor_batch[self.reward_fn_key]
 
-            extra_info = data_item.non_tensor_batch.get('extra_info', None)
+            extra_info = data_item.non_tensor_batch.get('extra_info', {})
+            uid = data_item.non_tensor_batch['uid']
+            extra_info['uid'] = uid
 
             data_sources.append(data_source)
             solution_strs.append(response_str)
@@ -146,6 +151,11 @@ class BatchRewardManager:
             ground_truth=ground_truths,
             extra_info=extra_infos,
         )
+
+        result_metrics = {}
+        if isinstance(results, dict):
+            result_metrics = results['metrics']
+            results = results['results']
 
         for i, result in enumerate(results):
             data_item = data[i]  # DataProtoItem
@@ -204,6 +214,7 @@ class BatchRewardManager:
             return {
                 "reward_tensor": reward_tensor,
                 "reward_extra_info": reward_extra_info,
+                "metrics": result_metrics,
             }
         else:
             return reward_tensor

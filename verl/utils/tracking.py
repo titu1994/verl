@@ -24,9 +24,11 @@ from typing import List, Union, Dict, Any
 class Tracking(object):
     supported_backend = ["wandb", "mlflow", "swanlab", "vemlp_wandb", "tensorboard", "console"]
 
-    def __init__(self, project_name, experiment_name, default_backend: Union[str, List[str]] = 'console', config=None):
+    def __init__(self, project_name, experiment_name, default_backend: Union[str, List[str]] = 'console', config=None, wandb_id=None):
         if isinstance(default_backend, str):
             default_backend = [default_backend]
+        if wandb_id is None:
+            wandb_id = experiment_name
         for backend in default_backend:
             if backend == 'tracking':
                 import warnings
@@ -38,7 +40,7 @@ class Tracking(object):
 
         if 'tracking' in default_backend or 'wandb' in default_backend:
             import wandb
-            wandb.init(project=project_name, name=experiment_name, config=config)
+            wandb.init(project=project_name, name=experiment_name, id=wandb_id, config=config, resume='allow')
             self.logger['wandb'] = wandb
 
         if 'mlflow' in default_backend:

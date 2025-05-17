@@ -133,7 +133,15 @@ class RLHFDataset(Dataset):
             if parquet_file.endswith('.parquet'):
                 # read parquet files and cache
                 dataframe = pd.read_parquet(parquet_file)
-            dataframe['line_number'] = range(len(dataframe))
+            elif parquet_file.endswith('.jsonl'):
+                d = []
+                with open(parquet_file, 'r') as f:
+                    for line in f:
+                        try:
+                            d.append(json.loads(line))
+                        except:
+                            pass
+                dataframe = pd.DataFrame(d)
             dataframes.append(dataframe)
         self.dataframe = pd.concat(dataframes)
 

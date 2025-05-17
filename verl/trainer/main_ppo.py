@@ -20,16 +20,62 @@ import os
 import ray
 import json
 import hydra
+from collections import defaultdict
 
-def sandbox_code_compute_score(data_source, solution_str, ground_truth, extra_info=None):
+def processed_code_compute_score(data_source, solution_str, ground_truth, extra_info=None):
+    # ground truth is reward_model key, correct_list is part of it
     import re
-    from verl.utils.reward_score.nemo_code.code_sandbox_reward import remove_code_fence, execute_via_sandbox
+    from verl.utils.reward_score.nemo_code.code_sandbox_reward import remove_code_fence, execute_via_internal
 
     solution_strs = solution_str
     ground_truths = ground_truth
 
     results = []
-    for solution_str, ground_truth in zip(solution_strs, ground_truths):
+    metrics = {'pass@k': defaultdict(list)}
+    for i, (solution_str, ground_truth) in enumerate(zip(solution_strs, ground_truths)):
+        non_tensor_datum = json.loads(ground_truth)
+        code_block = re.findall(r'```(.*?)```', solution_str, re.DOTALL)
+        if not code_block:
+            solution = solution_str
+        else:
+            solution = code_block[-1]
+        correct_list = non_tensor_datum['correct_list']
+
+        correct = all(correct_list)
+        acc = float(correct)
+        reward = 1.0 if correct else 0.0
+
+        if extra_info:
+            uid = extra_info[i]['uid']
+            metrics['pass@k'][uid].append(correct)
+
+        results.append({
+            'score': reward,
+            'acc': acc,
+            'pred': solution,
+        })
+
+    n_prompts = len(metrics['pass@k'])
+    if n_prompts > 0:
+        metrics['reward/all_pass'] = sum(all(metrics['pass@k'][uid]) for uid in metrics['pass@k']) / n_prompts
+        metrics['reward/pass@k'] = sum(any(metrics['pass@k'][uid]) for uid in metrics['pass@k']) / n_prompts
+    del metrics['pass@k']
+
+    return {
+        'metrics': metrics,
+        'results': results,
+    }
+
+
+def sandbox_code_compute_score(data_source, solution_str, ground_truth, extra_info=None):
+    import re
+    from verl.utils.reward_score.nemo_code.code_sandbox_reward import remove_code_fence, execute_via_internal
+
+    solution_strs = solution_str
+    ground_truths = ground_truth
+
+    results = []
+    for i, (solution_str, ground_truth) in enumerate(zip(solution_strs, ground_truths)):
         non_tensor_datum = json.loads(ground_truth)
         language = non_tensor_datum.get('language', 'python')
         code_block = re.findall(r'```(.*?)```', solution_str, re.DOTALL)
@@ -49,15 +95,18 @@ def sandbox_code_compute_score(data_source, solution_str, ground_truth, extra_in
             metadata = json.loads(non_tensor_datum['metadata'])
         fn_name = metadata.get('func_name', None)
 
-        correct_list = execute_via_sandbox(
+        if data_source[i].startswith('lcb'):
+            num_max_tests = 10000
+        correct_list = execute_via_internal(
             solution, 
             tests,
             num_max_tests, 
-            sandbox, 
             timeout, 
             language, 
             fn_name=fn_name,
         )
+        assert len(tests) > 0, tests
+        assert len(correct_list) == min(num_max_tests, len(tests)), (len(correct_list), len(tests), num_max_tests)
 
         correct = all(correct_list)
         acc = float(correct)
@@ -238,6 +287,9 @@ class TaskRunner:
         elif reward_manager_name == 'batched':
             from verl.workers.reward_manager import BatchRewardManager
             reward_manager_cls = BatchRewardManager
+        elif reward_manager_name == 'code_sandbox_reward':
+            from verl.utils.reward_score.nemo_code.code_sandbox_reward import RewardManager as CodeSandboxRewardManager
+            reward_manager_cls = CodeSandboxRewardManager
         else:
             raise NotImplementedError
 

@@ -17,6 +17,7 @@ import os
 import uuid
 import json
 import numpy as np
+import random
 import bisect
 import pandas as pd
 import torch
@@ -32,11 +33,34 @@ from verl import DataProto
 from verl.utils import torch_functional as torch_fn
 from verl.utils.model import compute_position_id_with_mask
 
+from verl.utils.reward_score.deepcoder import lcb_check_correctness_v2
 
 ############################################################
 # Utility Functions
 # (Mostly unchanged -- some references to sandbox are parameterized)
 ############################################################
+
+def preprocess_code(completion):
+    completion = completion.strip()
+    completion = completion.replace("\r", "")
+    if '```' in completion:
+        if '```python' in completion:
+            def_line = completion.index('```python') + len('```python')
+        else:
+            def_line = completion.index('```') + len('```')
+        completion = completion[def_line:].strip()
+        completion = completion.replace('```python', '')
+        try:
+            next_line = completion.index('```')
+            completion = completion[:next_line].strip()
+        except:
+            pass
+
+    if completion.startswith(" "):
+        completion = completion.strip()
+
+    return completion
+
 
 def extract_code_from_model(model_response: str):
     """
@@ -553,55 +577,42 @@ def convert_functional_tests_to_asserts(func_name, tests):
         unit_tests.append(test)
     return unit_tests
 
-
 def execute_via_internal(
     solution,
     tests,
-    num_max_tests,
     timeout,
     language,
     continuous=False,
     fn_name=None,
-    line_number=None,
 ):
     assert language.lower() == 'python', f"Unsupported language: {language}"
-    test_inputs = []
-    test_outputs = []
-    for key in tests:
-        if isinstance(tests[key], dict):
-            try:
-                test_inputs.extend(tests[key].get("input", []))
-                test_outputs.extend(tests[key].get("output", []))
-            except Exception as e:
-                print(e)
-                print(f'RRR {line_number}', tests[key])
-                raise e
-
-    test_inputs = test_inputs[:num_max_tests]
-    test_outputs = test_outputs[:num_max_tests]
 
     tests = {
-        'inputs': test_inputs,
-        'outputs': test_outputs,
+        'inputs': tests['inputs'],
+        'outputs': tests['outputs'],
         'fn_name': fn_name,
     }
 
-    # print('solution', solution)
-    # print('tests', tests)
+    try:
+        new_tests = []
+        for i, test in enumerate(tests['inputs']):
+            new_tests.append({
+                'input': test,
+                'output': tests['outputs'][i],
+                'metadata': {
+                    'func_name': fn_name,
+                },
+                'testtype': 'functional' if fn_name else 'stdin',
+            })
+        success = lcb_check_correctness_v2(new_tests, solution, debug=False)
 
-    from verl.utils.reward_score.prime_code import compute_score
-    success, _ = compute_score(
-        completion=solution,
-        test_cases=tests,
-        continuous=continuous,
-        timeout=timeout,
-    )
-    
-    if len(success) == 0:
-        if continuous:
-            return [False] * len(test_inputs)
-        else:
-            return [False]
+        if len(success) == 0:
+            if continuous:
+                return [False] * len(tests['inputs'])
+            else:
+                return [False]
+    except:
+        success = [False] * len(tests['inputs'])
 
     return success
 
@@ -661,7 +672,6 @@ def execute_via_sandbox(
         correct_list = res['correct_tests']
     return correct_list
 
-
 def compute_single_item_score(
     response_token_ids: list[int],
     tokenizer,
@@ -684,9 +694,9 @@ def compute_single_item_score(
     formatting = {}
     correct_list = []
 
-    think_tag = non_tensor_datum['think_tag']
-    answer_tag = non_tensor_datum['answer_tag']
-    stop_phrases = non_tensor_datum['stop_phrases']
+    think_tag = non_tensor_datum.get('think_tag', '')
+    answer_tag = non_tensor_datum.get('answer_tag', '')
+    stop_phrases = non_tensor_datum.get('stop_phrases', [])
     max_tokens = config.data.max_response_length
     problem_type = non_tensor_datum.get('problemtype', None)
     if problem_type is None:
@@ -698,7 +708,7 @@ def compute_single_item_score(
     write_content = []
 
     # 1) Reasoning split
-    if think_tag == '':
+    if (think_tag == '') or (event == 'subseq_rewards'):
         post_think_token_idx = 0
         formatting['think_open_count']  = None
         formatting['think_close_count'] = None
@@ -739,11 +749,14 @@ def compute_single_item_score(
     else:  # code
         language = non_tensor_datum.get('language', 'python')
         # code_block = re.search(r'```(.*?)```', response_text, re.DOTALL)
-        code_block = re.findall(r'```(.*?)```', response_text, re.DOTALL)
+        # code_block = re.findall(r'```(.*?)```', response_text, re.DOTALL)
+        code_block = [preprocess_code(response_text)]
 
         if not code_block:
             solution = response_text
             formatting['code_fence_missing'] = True
+            num_reasoning_tokens = len(response_token_ids)
+            num_non_reasoning_tokens = 0
         else:
             #solution = code_block.group(1)
             solution = code_block[-1]
@@ -761,26 +774,68 @@ def compute_single_item_score(
         tests = {k: v for k, v in all_tests.items() if k in tests_used}
 
         solution = remove_code_fence(language, solution)
+        code_str = solution if not formatting['code_fence_missing'] else None
         num_max_tests = code_cfg.get('limit_tests', 10) if event != 'val' else 10000
-        timeout = code_cfg.get('timeout', 5.0)
+        timeout = code_cfg.get('timeout', 1.0)
         test_type = non_tensor_datum['testtype']
 
-        fn_name = non_tensor_datum.get('metadata', {}).get('func_name', None)
+        if (sandbox is None) or (sandbox == 'sandbox'):
+            # fallback
+            sandbox = get_sandbox('fast')
+
+        metadata = non_tensor_datum.get('metadata', {})
+        if isinstance(metadata, str):
+            metadata = json.loads(metadata)
+        fn_name = metadata.get('func_name', None)
         assert test_type == 'stdin' or fn_name is not None, f"fn_name is required for non-stdin tests, {non_tensor_datum.get('line_number', None)}"
         assert fn_name is None or test_type == 'functional', f"fn_name is only supported for functional tests, {non_tensor_datum.get('line_number', None)}"
 
-        deepcoder_dataset = non_tensor_datum.get('metadata', {}).get('subset', None)
+        test_selection_strategy = code_cfg.get('test_selection_strategy', 'first')
+        line_number = non_tensor_datum.get('line_number', None)
+
+        test_inputs = []
+        test_outputs = []
+        for key in tests:
+            if isinstance(tests[key], dict):
+                try:
+                    inp = tests[key].get("input", [])
+                    out = tests[key].get("output", [])
+                    assert len(inp) == len(out), f"Input and output length mismatch for {key}, {non_tensor_datum.get('line_number', None)}"
+                    indices = list(range(len(inp)))
+                    random.shuffle(indices)
+                    inp = [inp[i] for i in indices]
+                    out = [out[i] for i in indices]
+                    test_inputs.extend(inp)
+                    test_outputs.extend(out)
+                except Exception as e:
+                    print(e)
+                    print(f'RRR {line_number}', tests[key])
+                    raise e
+
+        if test_selection_strategy == 'first':
+            test_inputs = test_inputs[:num_max_tests]
+            test_outputs = test_outputs[:num_max_tests]
+        elif test_selection_strategy == 'hard':
+            stringified_inputs = [str(inp) for inp in test_inputs]
+            test_inputs_indices = sorted(range(len(stringified_inputs)), key=lambda x: -len(stringified_inputs[x]))
+            test_inputs = [test_inputs[i] for i in test_inputs_indices[:num_max_tests]]
+            test_outputs = [test_outputs[i] for i in test_inputs_indices[:num_max_tests]]
+        else:
+            raise ValueError(f"Unsupported test selection strategy: {test_selection_strategy}")
+
+        tests = {
+            'inputs': test_inputs,
+            'outputs': test_outputs,
+        }
 
         if sandbox == 'internal':
             correct_list = execute_via_internal(
                 solution, 
                 tests, 
-                num_max_tests, 
                 timeout, 
                 language, 
                 continuous=continuous,
                 fn_name=fn_name,
-                line_number=non_tensor_datum.get('line_number', None),
             )
         else:
             correct_list = execute_via_sandbox(
@@ -799,6 +854,7 @@ def compute_single_item_score(
         'num_reasoning_tokens': num_reasoning_tokens,
         'num_non_reasoning_tokens': num_non_reasoning_tokens,
     }
+
 
 
 def compute_item_results(data, tokenizer, config, event):
@@ -823,9 +879,6 @@ def compute_item_results(data, tokenizer, config, event):
             valid_resp_ids = batch['responses'][:valid_resp_len]
 
             non_tensor_datum = item.non_tensor_batch
-            if 'metadata' in non_tensor_datum:
-                if isinstance(non_tensor_datum['metadata'], str):
-                    non_tensor_datum['metadata'] = json.loads(non_tensor_datum['metadata'])
 
             fut = executor.submit(
                 compute_single_item_score,
@@ -1021,14 +1074,12 @@ class RewardManager:
     In __call__, we do:
       1. compute_item_results(...) [NEW method]
       2. aggregate rewards with _process_group
-      3. optionally apply logprob shaping
       4. return reward_tensor or the full tuple
     """
 
     def __init__(
         self,
         tokenizer,
-        num_examine=1,
         **kwargs,
     ):
         """
@@ -1039,7 +1090,6 @@ class RewardManager:
           num_examine: For printing / debugging
         """
         self.tokenizer = tokenizer
-        self.num_examine = num_examine
         self.last_epoch = None
         self.last_batch_index = None
 
@@ -1149,9 +1199,7 @@ class RewardManager:
         batch_index: int | None = None,
         event: str | None = None,
         config: dict | None = None,
-        ref_policy=None,
         return_reward_only: bool = True,
-        logprob_reward_coef: float = 0.0,
         concurrency_per_sandbox: int = 16,  # <--- new
         item_results: list[dict] | None = None,
     ):
@@ -1160,7 +1208,6 @@ class RewardManager:
           1) Possibly short-circuit if 'rm_scores' in data
           2) Compute item_results (compute_item_results)
           3) Aggregate them prompt-by-prompt
-          4) Possibly apply logprob shaping
           5) Return a reward_tensor or full suite
         """
         if 'rm_scores' in data.batch.keys():
@@ -1265,33 +1312,6 @@ class RewardManager:
         # summarize metrics
         # metrics = {k: np.mean(v) for k, v in metrics.items() if len(v) > 0}
 
-        # 6) optional logprob shaping
-        if logprob_reward_coef > 0.0:
-            logprob_rewards = self.generate_logprob_reward(
-                config,
-                data,
-                non_reasoning_tokens,
-                response_pad_tokens,
-                ref_policy,
-            )
-            num_modified = 0
-            for uid, idxes in batches_indices.items():
-                # example: if we want to do some "ranking" or "mix"
-                eligible = [(i, idx) for i, idx in enumerate(idxes) if logprob_rewards[idx] is not None]
-                if len(eligible) <= 1:
-                    continue
-                vals = torch.tensor([logprob_rewards[idx] for _, idx in eligible], device=reward_tensor.device)
-                vals -= vals.min()
-                if vals.max() > 0:
-                    vals /= vals.max()
-                resp_lens = all_response_lengths[uid]
-                for (grp_i, global_i), lv in zip(eligible, vals):
-                    resp_idx = resp_lens[grp_i] - 1
-                    if abs(float(reward_tensor[global_i, resp_idx])) < 1e-2:
-                        reward_tensor[global_i, resp_idx] = logprob_reward_coef * lv
-                        num_modified += 1
-            print('log‑prob shaping applied to', num_modified, 'responses')
-
         # 7) special case 'val'
         if event == 'val':
             return pass_ret
@@ -1312,113 +1332,3 @@ class RewardManager:
             prompt_pad_tokens,
             metrics,
         )
-
-    def generate_logprob_reward(self, config, data, all_num_non_reasoning_tokens, response_num_pad_tokens, ref_policy):
-        # same logic as before, or adapt as needed
-        assert len(data) == len(all_num_non_reasoning_tokens)
-        logprob_rewards = [None] * len(data)
-        idx_solutions = []
-        logprob_batch = {'input_ids': [], 'attention_mask': [], 'position_ids': [], 'responses': []}
-        new_solution_len = []
-
-        max_response_length = data.batch['responses'].shape[1]
-        for i_batch in range(len(data)):
-            input_ids      = data[i_batch].batch['input_ids']
-            attention_mask = data[i_batch].batch['attention_mask']
-            position_ids   = data[i_batch].batch['position_ids']
-            response_ids   = data[i_batch].batch['responses']
-
-            num_non_reasoning_tokens = all_num_non_reasoning_tokens[i_batch]
-            prompt_len = input_ids[:-max_response_length].shape[-1]
-
-            if response_num_pad_tokens[i_batch] > 0:
-                amt = response_num_pad_tokens[i_batch]
-                input_ids      = input_ids[:-amt]
-                attention_mask = attention_mask[:-amt]
-                position_ids   = position_ids[:-amt]
-                response_ids   = response_ids[:-amt]
-
-            if num_non_reasoning_tokens == response_ids.shape[-1] or num_non_reasoning_tokens == 0:
-                continue
-
-            reasoning_ids = response_ids[:-num_non_reasoning_tokens]
-            prompt_and_reasoning_attention_mask = attention_mask[:-num_non_reasoning_tokens]
-            prompt_and_reasoning_position_ids   = position_ids[:-num_non_reasoning_tokens]
-
-            solutions = data[i_batch].non_tensor_batch['solutions']
-            idx_solution = None
-            for i_sol, lang_code in enumerate(solutions['language']):
-                if lang_code == 3:  # e.g. python3
-                    idx_solution = i_sol
-                    break
-            if idx_solution is None:
-                continue
-
-            solution_str = f"```python\n{solutions['solutions'][idx_solution]}\n```"
-            sol_data = self.tokenizer(solution_str, return_tensors='pt', add_special_tokens=False)
-            sol_token_ids = sol_data['input_ids'].to(device=input_ids.device)[0]
-            sol_attention_mask = sol_data['attention_mask'].to(device=input_ids.device)[0]
-
-            remaining_length = max_response_length - (reasoning_ids.shape[-1] + sol_token_ids.shape[-1])
-            if remaining_length < 0:
-                sol_token_ids = sol_token_ids[:remaining_length]
-                sol_attention_mask = sol_attention_mask[:remaining_length]
-                remaining_length = 0
-
-            # pad up
-            sol_token_ids = torch.cat([
-                sol_token_ids,
-                torch.ones(remaining_length, device=sol_token_ids.device, dtype=torch.long) * self.tokenizer.pad_token_id
-            ], dim=-1)
-            sol_attention_mask = torch.cat([
-                sol_attention_mask,
-                torch.zeros(remaining_length, device=sol_attention_mask.device, dtype=torch.long)
-            ], dim=-1)
-
-            delta_position_ids = torch.arange(1, sol_token_ids.shape[-1] + 1, device=sol_token_ids.device)
-            idx_solutions.append(i_batch)
-            new_solution_len.append(sol_token_ids.shape[-1])
-
-            full_solution_ids = torch.cat([reasoning_ids, sol_token_ids], dim=-1)
-            new_input_ids     = torch.cat([input_ids[:prompt_len], full_solution_ids], dim=-1)
-            new_attention_mask= torch.cat([prompt_and_reasoning_attention_mask, sol_attention_mask], dim=-1)
-
-            response_position_ids = prompt_and_reasoning_position_ids[-1] + delta_position_ids
-            new_position_ids      = torch.cat([prompt_and_reasoning_position_ids, response_position_ids], dim=-1)
-
-            logprob_batch['input_ids'].append(new_input_ids)
-            logprob_batch['attention_mask'].append(new_attention_mask)
-            logprob_batch['position_ids'].append(new_position_ids)
-            logprob_batch['responses'].append(full_solution_ids)
-
-        if len(idx_solutions) == 0:
-            return logprob_rewards
-
-        for k in logprob_batch:
-            logprob_batch[k] = torch.stack(logprob_batch[k])
-        num_samples = logprob_batch['input_ids'].shape[0]
-
-        world_size = config.trainer.nnodes * config.trainer.n_gpus_per_node
-        remainder = num_samples % world_size
-        if remainder != 0:
-            # replicate sample so total is multiple of world_size
-            num_repeats = world_size - remainder
-            for k in logprob_batch:
-                repeated_sample = torch.stack([logprob_batch[k][0]] * num_repeats, dim=0)
-                logprob_batch[k] = torch.cat([logprob_batch[k], repeated_sample], dim=0)
-
-        # convert to DataProto
-        logprob_batch = DataProto.from_single_dict(logprob_batch)
-        log_probs = ref_policy.compute_ref_log_prob(logprob_batch)
-        log_probs = log_probs.batch['ref_log_prob'][:num_samples]
-
-        processed_log_probs = []
-        for i in range(num_samples):
-            sol_len = new_solution_len[i]
-            chunk = log_probs[i, -sol_len:]
-            processed_log_probs.append(chunk.mean().item())
-
-        for i, j in enumerate(idx_solutions):
-            logprob_rewards[j] = processed_log_probs[i]
-
-        return logprob_rewards

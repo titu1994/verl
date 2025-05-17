@@ -25,6 +25,7 @@ When working with Megatron:
 - After inference, all the parameters that doesn't belong to this pp rank is freed.
 """
 import numpy as np
+import random
 from typing import List
 from contextlib import contextmanager
 from omegaconf import DictConfig
@@ -188,6 +189,7 @@ class vLLMRollout(BaseRollout):
             } for raw_prompt_ids in non_tensor_batch.pop('raw_prompt_ids')]
 
         do_sample = prompts.meta_info.get('do_sample', True)
+        n_per_tp = kwargs['n'] if 'n' in kwargs else self.config.get('n_per_tp', self.config.n)
         is_validate = prompts.meta_info.get('validate', False)
         if not do_sample:
             kwargs = {
@@ -206,6 +208,10 @@ class vLLMRollout(BaseRollout):
                 'temperature': self.config.val_kwargs.temperature,
                 'n': 1,  # if validate, already repeat in ray_trainer
             }
+        else:
+            seed = random.randint(0, 1000000) + torch.distributed.get_rank() # need this because each rank seems to generate the same random seed leading to same generations
+            kwargs['seed'] = seed
+            kwargs['n'] = n_per_tp
 
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**kwargs):
