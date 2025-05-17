@@ -137,8 +137,9 @@ class BatchRewardManager:
             data_source = data_item.non_tensor_batch[self.reward_fn_key]
 
             extra_info = data_item.non_tensor_batch.get('extra_info', {})
-            uid = data_item.non_tensor_batch['uid']
-            extra_info['uid'] = uid
+            if 'uid' in data_item.non_tensor_batch:
+                uid = data_item.non_tensor_batch['uid']
+                extra_info['uid'] = uid
 
             data_sources.append(data_source)
             solution_strs.append(response_str)

@@ -45,7 +45,7 @@ def processed_code_compute_score(data_source, solution_str, ground_truth, extra_
         acc = float(correct)
         reward = 1.0 if correct else 0.0
 
-        if extra_info:
+        if extra_info and 'uid' in extra_info[i]:
             uid = extra_info[i]['uid']
             metrics['pass@k'][uid].append(correct)
 

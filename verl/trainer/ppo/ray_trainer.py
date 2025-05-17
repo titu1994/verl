@@ -617,7 +617,7 @@ class RayPPOTrainer(object):
             test_batch = test_batch.union(test_output_gen_batch)
 
             # evaluate using reward_function
-            result = self.val_reward_fn(test_batch, return_dict=True)
+            result = self.compute_reward(test_batch, event='val', return_dict=True)
             reward_tensor = result["reward_tensor"]
             if "reward_extra_info" in result:
                 for key, lst in result["reward_extra_info"].items():
@@ -972,8 +972,6 @@ class RayPPOTrainer(object):
             reward_result = self.reward_fn(batch, return_dict=return_dict)
         else:
             reward_result = self.val_reward_fn(batch, return_dict=return_dict)
-
-        print('MMM1', reward_result.keys())
 
         return reward_result
 
