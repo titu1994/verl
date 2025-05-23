@@ -578,6 +578,7 @@ class ActorRolloutRefWorker(Worker):
             tokenizer=self.tokenizer,
             config=data.meta_info['config'],
             event=data.meta_info['event'],
+            sandbox='internal',
         )
 
         return results

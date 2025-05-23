@@ -93,8 +93,7 @@ class RLHFDataset(Dataset):
                  return_raw_chat=False,
                  truncation='error',
                  filter_overlong_prompts=False,
-                 prompt_config_files=None,
-                 prompt_template_file=None):
+            ):
         if not isinstance(parquet_files, (List, ListConfig)):
             parquet_files = [parquet_files]
 
@@ -139,6 +138,8 @@ class RLHFDataset(Dataset):
                     for line in f:
                         try:
                             d.append(json.loads(line))
+                            #  if (not self.disable_chat_template) and (type(line[prompt_key]) != list):
+                            #     line[prompt_key] = [{'content': line[prompt_key], 'role': 'user'}]
                         except:
                             pass
                 dataframe = pd.DataFrame(d)

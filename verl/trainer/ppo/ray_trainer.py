@@ -137,6 +137,15 @@ class ResourcePoolManager:
 import torch
 from verl.utils.torch_functional import masked_mean
 
+def write_generations(dir_path, event, data: list[dict], epoch: int, batch_index: int):
+    os.makedirs(dir_path, exist_ok=True)
+    idx = str(uuid.uuid4())
+    filepath = os.path.join(dir_path, f"{event}_{epoch}_{batch_index}_{idx}.jsonl")
+    with open(filepath, 'w') as f:
+        for item in data:
+            print(json.dumps(item), file=f)
+
+
 def wrap_reward_fn(reward_fn):
     import inspect
     params = inspect.signature(reward_fn).parameters
@@ -464,8 +473,7 @@ class RayPPOTrainer(object):
                                          return_raw_chat=self.config.data.get('return_raw_chat', False),
                                          truncation=self.config.data.get('truncation', 'error'),
                                          filter_overlong_prompts=self.config.data.filter_overlong_prompts,
-                                         prompt_config_files=self.config.data.get('prompt_config_files', None),
-                                         prompt_template_file=self.config.data.get('prompt_template_file', None)
+                                         disable_chat_template=self.config.data.get('disable_chat_template', False),
                                          )
         assert self.train_dataset.truncation == self.config.data.get(
             'truncation', 'error'
@@ -495,8 +503,8 @@ class RayPPOTrainer(object):
                                        return_raw_chat=self.config.data.get('return_raw_chat', False),
                                        truncation=self.config.data.get('truncation', 'error'),
                                        filter_overlong_prompts=self.config.data.filter_overlong_prompts,
-                                       prompt_config_files=self.config.data.get('prompt_config_files', None),
-                                       prompt_template_file=self.config.data.get('prompt_template_file', None))
+                                       disable_chat_template=self.config.data.get('disable_chat_template', False),
+                                    )
         assert self.val_dataset.truncation == self.config.data.get(
             'truncation', 'error'
         ), f'dataset truncation {self.val_dataset.truncation} must be the same as config {self.config.data.get("truncation", "error")}'
@@ -972,6 +980,39 @@ class RayPPOTrainer(object):
             reward_result = self.reward_fn(batch, return_dict=return_dict)
         else:
             reward_result = self.val_reward_fn(batch, return_dict=return_dict)
+
+        write_content = []
+        for i in range(len(batch)):
+            content = {}
+            data_item = batch[i]
+            prompt_ids = data_item.batch['prompts']
+
+            prompt_length = prompt_ids.shape[-1]
+
+            valid_prompt_length = data_item.batch['attention_mask'][:prompt_length].sum()
+            valid_prompt_ids = prompt_ids[-valid_prompt_length:]
+
+            response_ids = data_item.batch['responses']
+            valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum()
+            valid_response_ids = response_ids[:valid_response_length]
+
+            # decode
+            prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
+            response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
+
+            # print('MMM1', reward_result['reward_extra_info'].keys(), len(batch), len(reward_result['reward_extra_info']['score']))
+
+            # extra_info = {k : v[i] for k, v in reward_result['reward_extra_info'].items()}
+
+            content = {
+                'prompt': prompt_str,
+                'response': response_str,
+                # 'reward': extra_info,
+            }
+
+            write_content.append(content)
+
+        write_generations(self.config.trainer.generations_dir, event, write_content, epoch, batch_index)
 
         return reward_result
 

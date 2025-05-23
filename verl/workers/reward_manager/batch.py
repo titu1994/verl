@@ -158,6 +158,7 @@ class BatchRewardManager:
             result_metrics = results['metrics']
             results = results['results']
 
+        print('BRBR1', len(results), len(data))
         for i, result in enumerate(results):
             data_item = data[i]  # DataProtoItem
 
@@ -181,6 +182,9 @@ class BatchRewardManager:
                     reward_extra_info[key].append(value)
             else:
                 score = result
+
+            for key, value in result.items():
+                reward_extra_info[key].append(value)
 
             reward = score
 

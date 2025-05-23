@@ -15,7 +15,9 @@
 import re
 import os
 import uuid
+import sys
 import json
+import requests
 import numpy as np
 import random
 import bisect
@@ -26,7 +28,6 @@ import threading
 from collections import OrderedDict, defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from verl.utils.reward_score.nemo_code.sandbox import get_sandbox
 from verl.utils.reward_score.nemo_code.code_execution import sandbox_code_execution
 
 from verl import DataProto
@@ -144,188 +145,26 @@ def count_sublist(lst, sublst):
             i += 1
     return count
 
-def compute_math_score(solution_str, ground_truth, box_strict=True) -> float:
-    retval = 0.
-    extra_length = 0
+def compute_math_score(response_text, expected):
     try:
-        string_in_last_boxed, extra_length, strict = boxed_only_string(solution_str, last=True, box_strict=box_strict)
-        if string_in_last_boxed is not None:
-            if strict:
-                answer = remove_boxed(string_in_last_boxed)
-            if is_equiv(answer, ground_truth):
-                retval = 1.
-        else:
-            retval = -1.
+        payload = {
+            'solution': response_text,
+            'answer': expected,
+            'max_memory': 1,
+        }
+        resp = requests.post('http://localhost:6000/math_verify', headers={"Content-Type": "application/json"}, json=payload)
+        resp.raise_for_status()
     except Exception as e:
-        retval = -1.
-        print(e)
-
-    return retval, extra_length
-
-def is_equiv(str1, str2, verbose=False):
-    if str1 is None and str2 is None:
-        print("WARNING: Both None")
-        return True
-    if str1 is None or str2 is None:
+        print(f"Request failed: {e}", file=sys.stderr)
         return False
+
     try:
-        ss1 = strip_string(str1)
-        ss2 = strip_string(str2)
-        if verbose:
-            print(ss1, ss2)
-        return ss1 == ss2
-    except Exception:
-        return str1 == str2
+        resp = resp.json()
+    except Exception as e:
+        print(f"Failed to parse response: {e}", file=sys.stderr)
+        return False
 
-def remove_boxed(s):
-    if "\\boxed " in s:
-        left = "\\boxed "
-        assert s[:len(left)] == left
-        return s[len(left):]
-
-    left = "\\boxed{"
-    assert s[:len(left)] == left
-    assert s[-1] == "}"
-    return s[len(left):-1]
-
-def boxed_only_string(string, last=False, box_strict=True):
-    if last:
-        idx = string.rfind("\\boxed")
-    else:
-        idx = string.find("\\boxed")
-
-    if "\\boxed " in string:
-        # quick direct parse
-        value =  string.split("\\boxed ")[-1].split("$")
-        return "\\boxed " + value[0], len(value[1]) + 1, True
-
-    if idx < 0:
-        idx = string.rfind("\\fbox")
-        if idx < 0:
-            if box_strict:
-                return None, 0, True
-            else:
-                return string, 0, False
-
-    i = idx
-    right_brace_idx = None
-    num_left_braces_open = 0
-    while i < len(string):
-        if string[i] == "{":
-            num_left_braces_open += 1
-        if string[i] == "}":
-            num_left_braces_open -= 1
-            if num_left_braces_open == 0:
-                right_brace_idx = i
-                break
-        i += 1
-
-    if right_brace_idx is None:
-        retval = None, 0, True
-    else:
-        retval = string[idx:right_brace_idx + 1], len(string)-right_brace_idx-1, True
-
-    return retval
-
-def fix_fracs(string):
-    substrs = string.split("\\frac")
-    new_str = substrs[0]
-    if len(substrs) > 1:
-        substrs = substrs[1:]
-        for substr in substrs:
-            new_str += "\\frac"
-            if substr[0] == "{":
-                new_str += substr
-            else:
-                try:
-                    assert len(substr) >= 2
-                except AssertionError:
-                    return string
-                a = substr[0]
-                b = substr[1]
-                if b != "{":
-                    if len(substr) > 2:
-                        post_substr = substr[2:]
-                        new_str += "{" + a + "}{" + b + "}" + post_substr
-                    else:
-                        new_str += "{" + a + "}{" + b + "}"
-                else:
-                    if len(substr) > 2:
-                        post_substr = substr[2:]
-                        new_str += "{" + a + "}" + b + post_substr
-                    else:
-                        new_str += "{" + a + "}" + b
-    string = new_str
-    return string
-
-def fix_a_slash_b(string):
-    if len(string.split("/")) != 2:
-        return string
-    a = string.split("/")[0]
-    b = string.split("/")[1]
-    try:
-        a = int(a)
-        b = int(b)
-        assert string == "{}/{}".format(a, b)
-        return f"\\frac{{{a}}}{{{b}}}"
-    except (AssertionError, ValueError):
-        return string
-
-def remove_right_units(string):
-    if "\\text{ " in string:
-        splits = string.split("\\text{ ")
-        assert len(splits) == 2
-        return splits[0]
-    else:
-        return string
-
-def fix_sqrt(string):
-    if "\\sqrt" not in string:
-        return string
-    splits = string.split("\\sqrt")
-    new_string = splits[0]
-    for split in splits[1:]:
-        if split and split[0] != "{":
-            a = split[0]
-            new_substr = "\\sqrt{" + a + "}" + split[1:]
-        else:
-            new_substr = "\\sqrt" + split
-        new_string += new_substr
-    return new_string
-
-def strip_string(string):
-    string = string.replace("\n", "")
-    string = string.replace("\\!", "")
-    string = string.replace("\\\\", "\\")
-    string = string.replace("tfrac", "frac")
-    string = string.replace("dfrac", "frac")
-    string = string.replace("\\left", "")
-    string = string.replace("\\right", "")
-    string = string.replace("^{\\circ}", "")
-    string = string.replace("^\\circ", "")
-    string = string.replace("\\$", "")
-    string = remove_right_units(string)
-    string = string.replace("\\%", "")
-    string = string.replace("\%", "")
-    string = string.replace(" .", " 0.")
-    string = string.replace("{.", "{0.")
-
-    if len(string) == 0:
-        return string
-    if string[0] == ".":
-        string = "0" + string
-
-    if len(string.split("=")) == 2:
-        if len(string.split("=")[0]) <= 2:
-            string = string.split("=")[1]
-
-    string = fix_sqrt(string)
-    string = string.replace(" ", "")
-    string = fix_fracs(string)
-    if string == "0.5":
-        string = "\\frac{1}{2}"
-    string = fix_a_slash_b(string)
-    return string
+    return resp['is_correct']
 
 def process_answer_tags(
     tokenizer,
@@ -577,6 +416,29 @@ def convert_functional_tests_to_asserts(func_name, tests):
         unit_tests.append(test)
     return unit_tests
 
+def get_num_reasoning_tokens(response_token_ids, fence_start, answer_string, tokenizer, language):
+    decoded = [tokenizer.decode([tok_id], skip_special_tokens=False) for tok_id in response_token_ids]
+    lens = [len(tok) for tok in decoded]
+    lens = np.cumsum(lens)
+    s = ''.join(decoded)
+
+    substr = fence_start + answer_string[:20]
+    idx = s.rfind(substr)
+    if idx == -1:
+        substr = f'```{language}'
+    idx = s.rfind(substr)
+    if idx == -1:
+        substr = '```'
+    idx = s.rfind(substr)
+    if idx == -1:
+        return 0, len(response_token_ids)
+
+    idx = bisect.bisect_left(lens, idx)
+    num_reasoning_tokens = idx
+    num_non_reasoning_tokens = len(response_token_ids) - num_reasoning_tokens
+    return num_reasoning_tokens, num_non_reasoning_tokens
+
+
 def execute_via_internal(
     solution,
     tests,
@@ -617,60 +479,70 @@ def execute_via_internal(
     return success
 
 
-def get_num_reasoning_tokens(response_token_ids, fence_start, answer_string, tokenizer, language):
+def execute_via_sandbox(
+    solution,
+    tests,
+    fn_name=None,
+):
+    tests = {
+        'inputs': tests['inputs'],
+        'outputs': tests['outputs'],
+        'fn_name': fn_name,
+    }
+
+    new_tests = []
+    for i, test in enumerate(tests['inputs']):
+        new_tests.append({
+            'input': test,
+            'output': tests['outputs'][i],
+            'metadata': {
+                'func_name': fn_name,
+            },
+            'testtype': 'functional' if fn_name else 'stdin',
+        })
+
+    payload = {
+        'sample': new_tests,
+        'generation': solution,
+        'debug': False,
+    }
+
+    num_tests = len(new_tests)
+
+    try:
+        resp = requests.post('http://localhost:6000/lcb', headers={"Content-Type": "application/json"}, json=payload)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"Request failed: {e}", file=sys.stderr)
+        return [False] * num_tests
+
+    try:
+        resp = resp.json()
+    except Exception as e:
+        print(f"Failed to parse response: {e}", file=sys.stderr)
+        return [False] * num_tests
+
+    return resp
+
+
+def get_num_math_reasoning_tokens(response_token_ids, tokenizer):
     decoded = [tokenizer.decode([tok_id], skip_special_tokens=False) for tok_id in response_token_ids]
     lens = [len(tok) for tok in decoded]
     lens = np.cumsum(lens)
     s = ''.join(decoded)
 
-    substr = fence_start + answer_string[:20]
+    substr = '</think>'
     idx = s.rfind(substr)
     if idx == -1:
-        substr = f'```{language}'
-    idx = s.rfind(substr)
-    if idx == -1:
-        substr = '```'
+        substr = r'\boxed'
     idx = s.rfind(substr)
     if idx == -1:
         return 0, len(response_token_ids)
 
     idx = bisect.bisect_left(lens, idx)
-    num_reasoning_tokens = idx
-    num_non_reasoning_tokens = len(response_token_ids) - num_reasoning_tokens
-    return num_reasoning_tokens, num_non_reasoning_tokens
-
-
-def execute_via_sandbox(
-    solution,
-    tests,
-    limit,
-    sandbox,
-    timeout,
-    language,
-    fn_name=None,
-):
-    if (sandbox is None) or (sandbox == 'sandbox'):
-        # fallback
-        sandbox = get_sandbox('fast')
-
-    test_type = 'stdin' if fn_name is None else 'functional'
-    if test_type == 'stdin':
-        correct_list = execute_stdin_tests(
-            solution, tests, limit, sandbox, timeout, language
-        )
-    else:
-        assert fn_name is not None
-        if 'class Solution' in solution:
-            solution += f"\n\n{fn_name} = Solution().{fn_name}"
-        unit_tests = convert_functional_tests_to_asserts(fn_name, tests)
-        res = sandbox_code_execution(
-            completion=solution,
-            unit_tests=unit_tests,
-            timeout=timeout,
-            sandbox=sandbox
-        )
-        correct_list = res['correct_tests']
-    return correct_list
+    num_think_tokens = idx
+    num_non_think_tokens = len(response_token_ids) - num_think_tokens
+    return num_think_tokens, num_non_think_tokens
 
 def compute_single_item_score(
     response_token_ids: list[int],
@@ -741,10 +613,10 @@ def compute_single_item_score(
 
     # 4) correctness
     if problem_type == 'math':
+        num_reasoning_tokens, num_non_reasoning_tokens = get_num_math_reasoning_tokens(response_token_ids, tokenizer)
         expected = non_tensor_datum.get('expected_answer')
-        res, _ = compute_math_score(response_text, expected, box_strict=True)
-        formatting['math_box_missing'] = (res == -1.0)
-        correct_list.append(int(res == 1.0))
+        res = compute_math_score(response_text, expected)
+        correct_list.append(res)
 
     else:  # code
         language = non_tensor_datum.get('language', 'python')
@@ -778,10 +650,6 @@ def compute_single_item_score(
         num_max_tests = code_cfg.get('limit_tests', 10) if event != 'val' else 10000
         timeout = code_cfg.get('timeout', 1.0)
         test_type = non_tensor_datum['testtype']
-
-        if (sandbox is None) or (sandbox == 'sandbox'):
-            # fallback
-            sandbox = get_sandbox('fast')
 
         metadata = non_tensor_datum.get('metadata', {})
         if isinstance(metadata, str):
@@ -841,10 +709,6 @@ def compute_single_item_score(
             correct_list = execute_via_sandbox(
                 solution, 
                 tests, 
-                num_max_tests, 
-                sandbox, 
-                timeout, 
-                language, 
                 fn_name=fn_name,
             )
 
@@ -857,7 +721,7 @@ def compute_single_item_score(
 
 
 
-def compute_item_results(data, tokenizer, config, event):
+def compute_item_results(data, tokenizer, config, event, sandbox):
     """
     Spawns tasks to compute item_results for each item in 'data',
     respecting concurrency_per_sandbox for each sandbox.
@@ -887,7 +751,7 @@ def compute_item_results(data, tokenizer, config, event):
                 non_tensor_datum=non_tensor_datum,
                 config=config,
                 event=event,
-                sandbox='internal',
+                sandbox=sandbox,
                 continuous=continuous,
             )
             futures.append((i, fut))
@@ -1096,9 +960,6 @@ class RewardManager:
         port = 6000
         nodelist_str = os.environ.get("SLURM_JOB_NODELIST", "")
         hosts = expand_slurm_nodelist(nodelist_str)
-
-        # Create one sandbox per host
-        self.sandboxes = [get_sandbox(host=h, port=port, sandbox_type='fast') for h in hosts]
 
     def write_generations(self, dir_path, event, data: list[dict]):
         os.makedirs(dir_path, exist_ok=True)
