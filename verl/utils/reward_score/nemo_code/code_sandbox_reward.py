@@ -17,6 +17,7 @@ import os
 import uuid
 import sys
 import json
+import time
 import requests
 import numpy as np
 import random
@@ -146,13 +147,14 @@ def count_sublist(lst, sublst):
     return count
 
 def compute_math_score(response_text, expected):
+    port = os.getenv("NEMO_SKILLS_SANDBOX_PORT", "6000")
     try:
         payload = {
             'solution': response_text,
             'answer': expected,
             'max_memory': 1,
         }
-        resp = requests.post('http://localhost:6000/math_verify', headers={"Content-Type": "application/json"}, json=payload)
+        resp = requests.post(f'http://localhost:{port}/math_verify', headers={"Content-Type": "application/json"}, json=payload)
         resp.raise_for_status()
     except Exception as e:
         print(f"Request failed: {e}", file=sys.stderr)
@@ -483,12 +485,16 @@ def execute_via_sandbox(
     solution,
     tests,
     fn_name=None,
+    early_exit=False,
 ):
+    import time
+    port = os.getenv("NEMO_SKILLS_SANDBOX_PORT", "6000")
     tests = {
         'inputs': tests['inputs'],
         'outputs': tests['outputs'],
         'fn_name': fn_name,
     }
+
 
     new_tests = []
     for i, test in enumerate(tests['inputs']):
@@ -504,17 +510,31 @@ def execute_via_sandbox(
     payload = {
         'sample': new_tests,
         'generation': solution,
-        'debug': False,
+        'max_memory': 10,
+        'early_exit': early_exit,
     }
 
     num_tests = len(new_tests)
 
-    try:
-        resp = requests.post('http://localhost:6000/lcb', headers={"Content-Type": "application/json"}, json=payload)
-        resp.raise_for_status()
-    except Exception as e:
-        print(f"Request failed: {e}", file=sys.stderr)
-        return [False] * num_tests
+    start_time = time.time()
+    i = 0
+    while True:
+        try:
+            resp = requests.post(f'http://localhost:{port}/lcb', headers={"Content-Type": "application/json"}, json=payload)
+            resp.raise_for_status()
+            break
+        except Exception as e:
+            end_time = time.time()
+            interval = end_time - start_time
+            e = str(e)
+            if ('Gateway Time-out' in e) and (i < 0):
+                i += 1
+                sleep_time = (random.randint(0, 100) / 100 + 1) * 10
+                print(f'Retrying for the {i} time, sleep_time: {sleep_time}')
+                time.sleep(sleep_time)
+                continue
+            print(f"Request failed: {e}", file=sys.stderr)
+            return [False] * num_tests
 
     try:
         resp = resp.json()
@@ -523,7 +543,6 @@ def execute_via_sandbox(
         return [False] * num_tests
 
     return resp
-
 
 def get_num_math_reasoning_tokens(response_token_ids, tokenizer):
     decoded = [tokenizer.decode([tok_id], skip_special_tokens=False) for tok_id in response_token_ids]
@@ -537,7 +556,7 @@ def get_num_math_reasoning_tokens(response_token_ids, tokenizer):
         substr = r'\boxed'
     idx = s.rfind(substr)
     if idx == -1:
-        return 0, len(response_token_ids)
+        return len(response_token_ids), 0
 
     idx = bisect.bisect_left(lens, idx)
     num_think_tokens = idx
@@ -566,10 +585,7 @@ def compute_single_item_score(
     formatting = {}
     correct_list = []
 
-    think_tag = non_tensor_datum.get('think_tag', '')
-    answer_tag = non_tensor_datum.get('answer_tag', '')
     stop_phrases = non_tensor_datum.get('stop_phrases', [])
-    max_tokens = config.data.max_response_length
     problem_type = non_tensor_datum.get('problemtype', None)
     if problem_type is None:
         if ('expected_answer' in non_tensor_datum) and (non_tensor_datum['expected_answer'] is not None):
@@ -577,39 +593,11 @@ def compute_single_item_score(
         else:
             problem_type = 'code'
 
-    write_content = []
-
-    # 1) Reasoning split
-    if (think_tag == '') or (event == 'subseq_rewards'):
-        post_think_token_idx = 0
-        formatting['think_open_count']  = None
-        formatting['think_close_count'] = None
-
-    else:
-        post_think_token_idx, think_fmt, num_reasoning_tokens, num_non_reasoning_tokens = (
-            process_think_tags(
-                tokenizer,
-                response_token_ids,
-                think_tag,
-                max_tokens,
-            )
-        )
-        formatting.update(think_fmt)
-
-    # 2) Stop-phrase
     formatting['ends_with_stop_phrase'] = any(
         response_token_ids[-len(p):] == p for p in stop_phrases
     )
 
-    # 3) answer-tag
-    resp_after_think = response_token_ids[post_think_token_idx:]
-    ans_start, ans_len, ans_fmt = process_answer_tags(tokenizer, resp_after_think, answer_tag)
-    formatting.update(ans_fmt)
-
-    if ans_len > 0:
-        resp_after_think = resp_after_think[ans_start : ans_start + ans_len]
-
-    response_text = tokenizer.decode(resp_after_think, skip_special_tokens=False)
+    response_text = tokenizer.decode(response_token_ids, skip_special_tokens=False)
 
     # 4) correctness
     if problem_type == 'math':
@@ -639,23 +627,28 @@ def compute_single_item_score(
         tests_used = code_cfg.get('unit_tests_to_use', ['public', 'private', 'generated'])
 
         all_tests = {
-            'public'   : non_tensor_datum['public_test_cases'],
-            'private'  : non_tensor_datum['private_test_cases'],
-            'generated': non_tensor_datum['generated_test_cases']
+            'public'   : non_tensor_datum.get('public_test_cases', {}),
+            'private'  : non_tensor_datum.get('private_test_cases', {}),
+            'generated': non_tensor_datum.get('generated_test_cases', {}),
         }
         tests = {k: v for k, v in all_tests.items() if k in tests_used}
 
         solution = remove_code_fence(language, solution)
-        code_str = solution if not formatting['code_fence_missing'] else None
-        num_max_tests = code_cfg.get('limit_tests', 10) if event != 'val' else 10000
+        num_max_tests = code_cfg.get('limit_tests', 15) if event != 'val' else 10000
         timeout = code_cfg.get('timeout', 1.0)
         test_type = non_tensor_datum['testtype']
 
         metadata = non_tensor_datum.get('metadata', {})
         if isinstance(metadata, str):
             metadata = json.loads(metadata)
-        fn_name = metadata.get('func_name', None)
-        assert test_type == 'stdin' or fn_name is not None, f"fn_name is required for non-stdin tests, {non_tensor_datum.get('line_number', None)}"
+        assert type(metadata) == dict, f"metadata must be a dict, {metadata}, {non_tensor_datum.get('line_number', None)}, {non_tensor_datum.keys()}"
+        if 'func_name' in metadata:
+            fn_name = metadata['func_name']
+        elif 'fn_name' in metadata:
+            fn_name = metadata['fn_name']
+        else:
+            fn_name = None
+        assert test_type == 'stdin' or fn_name is not None, f"fn_name is required for non-stdin tests, {non_tensor_datum.get('line_number', None)}, {non_tensor_datum.keys()}, {metadata}"
         assert fn_name is None or test_type == 'functional', f"fn_name is only supported for functional tests, {non_tensor_datum.get('line_number', None)}"
 
         test_selection_strategy = code_cfg.get('test_selection_strategy', 'first')
@@ -683,7 +676,7 @@ def compute_single_item_score(
         if test_selection_strategy == 'first':
             test_inputs = test_inputs[:num_max_tests]
             test_outputs = test_outputs[:num_max_tests]
-        elif test_selection_strategy == 'hard':
+        elif test_selection_strategy == 'longest':
             stringified_inputs = [str(inp) for inp in test_inputs]
             test_inputs_indices = sorted(range(len(stringified_inputs)), key=lambda x: -len(stringified_inputs[x]))
             test_inputs = [test_inputs[i] for i in test_inputs_indices[:num_max_tests]]
@@ -710,14 +703,29 @@ def compute_single_item_score(
                 solution, 
                 tests, 
                 fn_name=fn_name,
+                early_exit=config.reward_model.reward_fn_args.code.get('early_exit', True),
             )
 
-    return {
-        'correct_list': correct_list,
-        'formatting': formatting,
-        'num_reasoning_tokens': num_reasoning_tokens,
-        'num_non_reasoning_tokens': num_non_reasoning_tokens,
-    }
+    if type(correct_list) == list:
+        return {
+            'correct_list': correct_list,
+            'formatting': formatting,
+            'num_reasoning_tokens': num_reasoning_tokens,
+            'num_non_reasoning_tokens': num_non_reasoning_tokens,
+            'problemtype': problem_type,
+        }
+    else:
+        assert type(correct_list) == dict, type(correct_list)
+        ret = {
+            'correct_list': correct_list['correct_list'],
+            'formatting': formatting,
+            'num_reasoning_tokens': num_reasoning_tokens,
+            'num_non_reasoning_tokens': num_non_reasoning_tokens,
+            'problemtype': problem_type,
+        }
+        if 'prediction' in correct_list:
+            ret['prediction'] = correct_list['prediction']
+        return ret
 
 
 

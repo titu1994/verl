@@ -157,25 +157,6 @@ def wrap_reward_fn(reward_fn):
         return reward_fn(batch, **kwargs)
     return wrapped_reward_fn
 
-def collect_reward_fn_metrics(reward_fn_metrics: list, reduction='mean'):
-    assert type(reward_fn_metrics) == list, f'{type(reward_fn_metrics)}'
-    new_reward_fn_metrics = {}
-    for i in range(len(reward_fn_metrics)):
-        for k, v in reward_fn_metrics[i].items():
-            if k not in new_reward_fn_metrics:
-                new_reward_fn_metrics[k] = []
-            if v != None:
-                new_reward_fn_metrics[k].append(v)
-    if reduction == 'mean':
-        for k, v in new_reward_fn_metrics.items():
-            new_reward_fn_metrics[k] = np.mean(v) if len(v) > 0 else None
-    elif reduction == 'none':
-        pass
-    else:
-        raise ValueError(f'Invalid reduction: {reduction}')
-    return new_reward_fn_metrics
-
-
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty='kl'):
     responses = data.batch['responses']
     response_length = responses.size(1)
@@ -324,6 +305,10 @@ class RayPPOTrainer(object):
         self.use_rm = Role.RewardModel in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
         self.validation_generations_logger = ValidationGenerationsLogger()
+
+        if (not self.config.actor_rollout_ref.actor.use_kl_loss) and (self.config.actor_rollout_ref.ref.get('model_path', '') == ''):
+            # if not use kl loss, we do not need to use reference policy
+            self.use_reference_policy = False
 
         # define KL control
         if self.use_reference_policy:
@@ -640,7 +625,7 @@ class RayPPOTrainer(object):
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
         for lst in reward_extra_infos_dict.values():
-            assert len(lst) == 0 or len(lst) == len(sample_scores)
+            assert len(lst) == 0 or len(lst) == len(sample_scores), f'len(lst) = {len(lst)}, len(sample_scores) = {len(sample_scores)}'
 
         data_sources = np.concatenate(data_source_lst, axis=0)
 
@@ -654,6 +639,7 @@ class RayPPOTrainer(object):
                 var2vals[metric_name].append(metric_vals[sample_idx])
 
         data_src2prompt2var2metric = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
+        aggregate_metric = defaultdict(list)
         for data_source, prompt2var2vals in data_src2prompt2var2vals.items():
             for prompt, var2vals in prompt2var2vals.items():
                 n_resps = len(var2vals["final_reward"])
@@ -665,12 +651,14 @@ class RayPPOTrainer(object):
 
                     metric[f"mean@{n_resps}"] = np.mean(var_vals)
                     metric[f"std@{n_resps}"] = np.std(var_vals)
+                    aggregate_metric[f"mean@{n_resps}"].append(np.mean(var_vals))
+                    aggregate_metric[f"std@{n_resps}"].append(np.std(var_vals))
 
                     ns = []
-                    n = 2
-                    while n < n_resps:
-                        ns.append(n)
-                        n *= 2
+                    # n = 2
+                    # while n < n_resps:
+                    #     ns.append(n)
+                    #     n *= 2
                     ns.append(n_resps)
 
                     data = [{"val": val, "pred": pred} for val, pred in zip(var_vals, preds)]
@@ -684,9 +672,16 @@ class RayPPOTrainer(object):
                                 lambda arr: np.min([d["val"] for d in arr]),
                                 partial(calc_maj_val, vote_key="pred", val_key="val")
                             ])
-                        metric[f"best@{n}/mean"], metric[f"best@{n}/std"] = bon_mean, bon_std
-                        metric[f"worst@{n}/mean"], metric[f"worst@{n}/std"] = won_mean, won_std
+                        # metric[f"best@{n}/mean"], metric[f"best@{n}/std"] = bon_mean, bon_std
+                        # metric[f"worst@{n}/mean"], metric[f"worst@{n}/std"] = won_mean, won_std
                         metric[f"maj@{n}/mean"], metric[f"maj@{n}/std"] = maj_n_mean, maj_n_std
+
+                        # aggregate_metric[f"best@{n}/mean"].append(bon_mean)
+                        # aggregate_metric[f"best@{n}/std"].append(bon_std)
+                        # aggregate_metric[f"worst@{n}/mean"].append(won_mean)
+                        # aggregate_metric[f"worst@{n}/std"].append(won_std)
+                        aggregate_metric[f"maj@{n}/mean"].append(maj_n_mean)
+                        aggregate_metric[f"maj@{n}/std"].append(maj_n_std)
 
                     data_src2prompt2var2metric[data_source][prompt][var_name] = metric
 
@@ -704,7 +699,12 @@ class RayPPOTrainer(object):
                     pfx = f"{data_source}/{var_name}/{metric_name}"
                     metric_dict[pfx] = np.mean(prompt_vals)
 
+        for key, value in aggregate_metric.items():
+            aggregate_metric[key] = np.mean(value)
+
         val_metric_dict = {f"val/{key}": value for key, value in metric_dict.items()}
+        val_metric_dict2 = {f"val/all/{key}": value for key, value in aggregate_metric.items()}
+        val_metric_dict.update(val_metric_dict2)
         return val_metric_dict
 
     def init_workers(self):
@@ -880,6 +880,20 @@ class RayPPOTrainer(object):
         metrics.update(global_balance_stats)
 
     def generate_sequences(self, gen_batch: DataProto):
+        """
+
+        Returns a DataProto object with fields
+        - batch:
+            - prompts: tensor of shape [batch_size, prompt_length]
+            - responses: tensor of shape [batch_size, response_length]
+            - input_ids: tensor of shape [batch_size, input_length] (concatenation of prompts and responses)
+            - attention_mask: tensor of shape [batch_size, input_length]
+            - position_ids: tensor of shape [batch_size, input_length]
+        - non_tensor_batch:
+            - multi_modal_inputs: tensor of shape [batch_size, multi_modal_inputs_length]
+            - other keys that went into non_tensor_batch
+        """
+
         # NOTE: this is very hacky, but doing this to work around the prompts >= num gpus restriction
         #       this is supposed to just duplicate all prompts TP times since that's what
         #       is done anyway in fsdp_workers.generate_sequences.
@@ -961,15 +975,13 @@ class RayPPOTrainer(object):
 
         arr = []
         for i, item_result in enumerate(item_results):
-            correct_list = item_result['correct_list']
             if 'reward_model' in batch[i].non_tensor_batch:
                 reward_model = json.loads(batch[i].non_tensor_batch['reward_model'])
-                reward_model['correct_list'] = correct_list
+                for key, value in item_result.items():
+                    reward_model[key] = value
                 batch[i].non_tensor_batch['reward_model'] = json.dumps(reward_model)
             else:
-                reward_model = {
-                    'correct_list': correct_list,
-                }
+                reward_model = item_result
                 arr.append(json.dumps(reward_model))
 
         if len(arr) > 0:
@@ -997,17 +1009,15 @@ class RayPPOTrainer(object):
             valid_response_ids = response_ids[:valid_response_length]
 
             # decode
-            prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
-            response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
+            prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=False)
+            response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=False)
 
-            # print('MMM1', reward_result['reward_extra_info'].keys(), len(batch), len(reward_result['reward_extra_info']['score']))
-
-            # extra_info = {k : v[i] for k, v in reward_result['reward_extra_info'].items()}
+            extra_info = {k : v[i] for k, v in reward_result['reward_extra_info'].items()}
 
             content = {
                 'prompt': prompt_str,
                 'response': response_str,
-                # 'reward': extra_info,
+                'reward': extra_info,
             }
 
             write_content.append(content)

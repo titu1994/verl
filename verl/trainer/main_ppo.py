@@ -25,20 +25,30 @@ from collections import defaultdict
 def processed_code_compute_score(data_source, solution_str, ground_truth, extra_info=None):
     # ground truth is reward_model key, correct_list is part of it
     import re
-    from verl.utils.reward_score.nemo_code.code_sandbox_reward import remove_code_fence, execute_via_internal
+    from nemo_skills.code_execution.math_grader import extract_answer
 
     solution_strs = solution_str
     ground_truths = ground_truth
 
     results = []
-    metrics = {'pass@k': defaultdict(list)}
+    metrics = {'pass@k': defaultdict(list), 'pass@1': []}
     for i, (solution_str, ground_truth) in enumerate(zip(solution_strs, ground_truths)):
         non_tensor_datum = json.loads(ground_truth)
-        code_block = re.findall(r'```(.*?)```', solution_str, re.DOTALL)
-        if not code_block:
-            solution = solution_str
+        
+        if non_tensor_datum['problemtype'] == 'math':
+            pred = extract_answer(solution_str)
         else:
-            solution = code_block[-1]
+            if 'prediction' in non_tensor_datum:
+                prediction = non_tensor_datum['prediction']
+                assert type(prediction) == list, type(prediction)
+                pred = '\n'.join([k.strip() for k in prediction])
+            else:
+                code_block = re.findall(r'```(.*?)```', solution_str, re.DOTALL)
+                if not code_block:
+                    pred = solution_str
+                else:
+                    pred = code_block[-1]
+
         correct_list = non_tensor_datum['correct_list']
 
         correct = all(correct_list)
@@ -48,75 +58,27 @@ def processed_code_compute_score(data_source, solution_str, ground_truth, extra_
         if extra_info and 'uid' in extra_info[i]:
             uid = extra_info[i]['uid']
             metrics['pass@k'][uid].append(correct)
+        metrics['pass@1'].append(acc)
 
         results.append({
             'score': reward,
             'acc': acc,
-            'pred': solution,
+            'pred': pred,
         })
 
     n_prompts = len(metrics['pass@k'])
     if n_prompts > 0:
         metrics['reward/all_pass'] = sum(all(metrics['pass@k'][uid]) for uid in metrics['pass@k']) / n_prompts
         metrics['reward/pass@k'] = sum(any(metrics['pass@k'][uid]) for uid in metrics['pass@k']) / n_prompts
+        metrics['reward/pass@1'] = sum(metrics['pass@1']) / len(metrics['pass@1'])
     del metrics['pass@k']
+    del metrics['pass@1']
 
     return {
         'metrics': metrics,
         'results': results,
     }
 
-
-def sandbox_code_compute_score(data_source, solution_str, ground_truth, extra_info=None):
-    import re
-    from verl.utils.reward_score.nemo_code.code_sandbox_reward import remove_code_fence, execute_via_internal
-
-    solution_strs = solution_str
-    ground_truths = ground_truth
-
-    results = []
-    for i, (solution_str, ground_truth) in enumerate(zip(solution_strs, ground_truths)):
-        non_tensor_datum = json.loads(ground_truth)
-        language = non_tensor_datum.get('language', 'python')
-        code_block = re.findall(r'```(.*?)```', solution_str, re.DOTALL)
-        if not code_block:
-            solution = solution_str
-        else:
-            solution = code_block[-1]
-        assert 'ground_truth' in non_tensor_datum, non_tensor_datum.keys()
-        tests = non_tensor_datum['ground_truth']
-        solution = remove_code_fence(language, solution)
-        test_type = non_tensor_datum['testtype']
-        num_max_tests = 10
-        timeout = 5.0
-        sandbox = None
-        metadata = {}
-        if 'metadata' in non_tensor_datum:
-            metadata = json.loads(non_tensor_datum['metadata'])
-        fn_name = metadata.get('func_name', None)
-
-        if data_source[i].startswith('lcb'):
-            num_max_tests = 10000
-        correct_list = execute_via_internal(
-            solution, 
-            tests,
-            num_max_tests, 
-            timeout, 
-            language, 
-            fn_name=fn_name,
-        )
-        assert len(tests) > 0, tests
-        assert len(correct_list) == min(num_max_tests, len(tests)), (len(correct_list), len(tests), num_max_tests)
-
-        correct = all(correct_list)
-        acc = float(correct)
-        reward = 1.0 if correct else 0.0
-        results.append({
-            'score': reward,
-            'acc': acc,
-            'pred': solution,
-        })
-    return results
 
 def sandbox_compute_score(data_source, solution_str, ground_truth, extra_info=None):
     from nemo_skills.code_execution.sandbox import LocalSandbox
@@ -303,7 +265,7 @@ class TaskRunner:
 
         # Note that we always use function-based RM for validation
         val_reward_fn = reward_manager_cls(tokenizer=tokenizer,
-                                        num_examine=1,
+                                        num_examine=0,
                                         compute_score=compute_score,
                                         reward_fn_key=config.data.reward_fn_key,
                                         max_resp_len=config.data.max_response_length,

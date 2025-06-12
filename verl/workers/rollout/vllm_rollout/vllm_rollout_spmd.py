@@ -111,6 +111,7 @@ class vLLMRollout(BaseRollout):
             max_model_len=config.prompt_length + config.response_length,
             disable_log_stats=config.disable_log_stats,
             max_num_batched_tokens=max_num_batched_tokens,
+            max_num_seqs=self.config.max_num_seqs,
             enable_chunked_prefill=config.enable_chunked_prefill,
             enable_prefix_caching=True,
         )

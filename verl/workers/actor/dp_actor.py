@@ -239,7 +239,7 @@ class DataParallelPPOActor(BasePPOActor):
         temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
 
         select_keys = ['responses', 'input_ids', 'attention_mask', 'position_ids', 'old_log_probs', 'advantages']
-        if self.config.use_kl_loss:
+        if (self.config.use_kl_loss) or ('ref_log_prob' in data.batch):
             select_keys.append('ref_log_prob')
         batch = data.select(batch_keys=select_keys).batch
         has_multi_modal_inputs = 'multi_modal_inputs' in data.non_tensor_batch.keys()
@@ -294,7 +294,8 @@ class DataParallelPPOActor(BasePPOActor):
                     # all return: (bsz, response_length)
                     entropy, log_prob = self._forward_micro_batch(micro_batch=data, temperature=temperature)
 
-                    pg_loss, pg_clipfrac, ppo_kl = core_algos.compute_policy_loss(
+                    pg_loss, pg_clipfrac, ppo_kl, contrastive_kl = core_algos.compute_policy_loss(
+                        config=self.config,
                         old_log_prob=old_log_prob,
                         log_prob=log_prob,
                         advantages=advantages,
@@ -302,7 +303,10 @@ class DataParallelPPOActor(BasePPOActor):
                         cliprange=clip_ratio,
                         cliprange_low=clip_ratio_low,
                         cliprange_high=clip_ratio_high,
-                        use_token_level_loss=use_token_level_loss)
+                        use_token_level_loss=use_token_level_loss,
+                        ref_log_prob=data['ref_log_prob'] if 'ref_log_prob' in data else None,
+                    )
+                    
                     # compute entropy loss from entropy
                     entropy_loss = verl_F.masked_mean(entropy, response_mask)
 
@@ -333,6 +337,7 @@ class DataParallelPPOActor(BasePPOActor):
                         'actor/pg_loss': pg_loss.detach().item(),
                         'actor/pg_clipfrac': pg_clipfrac.detach().item(),
                         'actor/ppo_kl': ppo_kl.detach().item(),
+                        'actor/contrastive_kl': contrastive_kl.detach().item(),
                     }
                     append_to_dict(metrics, data)
 

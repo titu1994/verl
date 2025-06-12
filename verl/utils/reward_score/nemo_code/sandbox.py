@@ -346,6 +346,88 @@ class PistonSandbox(Sandbox):
         }
 
 
+class LcbSandbox(LocalSandbox):
+    """Locally hosted sandbox."""
+
+    def _prepare_request(
+        self,
+        sample,
+        generation,
+        max_memory: int = 10,
+    ):
+        payload = {
+            'sample': sample,
+            'generation': generation,
+            'max_memory': 10,
+        }
+        return payload
+
+    def execute_code(
+        self,
+        sample,
+        generation,
+        max_memory: int = 10,
+    ) -> Tuple[Dict, str]:
+        if session_id is None:  # creating a new session with empty state
+            session_id = uuid.uuid4()
+            self.sessions[session_id] = []
+        self.sessions[session_id].append(generated_code)
+
+        request = self._prepare_request(sample, generation, max_memory)
+        try:
+            output = self._send_request(request, timeout)
+        except requests.exceptions.Timeout:
+            output = {
+                "process_status": "timeout",
+                "stdout": "TimeoutError",
+                "stderr": "TimeoutError",
+                "traceback": "TimeoutError",
+            }
+        # removing last state to not re-execute code with errors
+        if output['stderr'] != "":
+            self.sessions[session_id] = self.sessions[session_id][:-1]
+        return output, session_id
+
+    def run_checker(
+            self,
+            cf_contest_id: int,
+            cf_index: str,
+            inputs: str,
+            actual_outputs: str,
+            expected_outputs: str,
+            timeout: float = 10.0
+    ) -> Dict[str, str]:
+        url = f"http://{self.host}:{self.port}/checker"
+
+        request = {
+            'cf_contest_id': cf_contest_id,
+            'cf_index': cf_index,
+            'inputs': inputs,
+            'expected_outputs': expected_outputs,
+            'actual_outputs': actual_outputs,
+            'timeout': timeout,
+        }
+
+        if self.ssh_server and self.ssh_key_path:
+            import sshtunnel_requests
+
+            sshtunnel_request = sshtunnel_requests.from_url(f"ssh://{self.ssh_server}:22", self.ssh_key_path)
+            output = sshtunnel_request.post(
+                url=url,
+                data=json.dumps(request),
+                timeout=(timeout, timeout),
+                headers={"Content-Type": "application/json"},
+            )
+        else:
+            output = self.http_session.post(
+                url=url,
+                data=json.dumps(request),
+                timeout=(timeout, timeout),
+                headers={"Content-Type": "application/json"},
+            )
+        return self._parse_request_output(output)
+
+
 sandboxes = {
     'local': LocalSandbox,
     'fast': FastLocalSandbox,

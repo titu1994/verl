@@ -128,6 +128,7 @@ class RLHFDataset(Dataset):
 
     def _read_files_and_tokenize(self):
         dataframes = []
+        prompt_key = self.prompt_key
         for parquet_file in self.parquet_files:
             if parquet_file.endswith('.parquet'):
                 # read parquet files and cache
@@ -135,13 +136,23 @@ class RLHFDataset(Dataset):
             elif parquet_file.endswith('.jsonl'):
                 d = []
                 with open(parquet_file, 'r') as f:
-                    for line in f:
+                    num_lines = 0
+                    for i, line in enumerate(f):
+                        num_lines += 1
                         try:
-                            d.append(json.loads(line))
-                            #  if (not self.disable_chat_template) and (type(line[prompt_key]) != list):
-                            #     line[prompt_key] = [{'content': line[prompt_key], 'role': 'user'}]
+                            line = json.loads(line)
+                            if (not self.disable_chat_template) and (type(line[prompt_key]) != list):
+                                assert isinstance(line[prompt_key], str), f'prompt_key must be a string, but got {type(line[prompt_key])}'
+                                line[prompt_key] = [{'content': line[prompt_key], 'role': 'user'}]
+                            if i == 0:
+                                print('rl_dataset.py: EXAMPLE DATA ITEM\n', line)
+                            line['line_number'] = i+1
+                            if 'metadata' not in line:
+                                line['metadata'] = {}
+                            d.append(line)
                         except:
                             pass
+                print(f'Read {len(d)}/{num_lines} lines')
                 dataframe = pd.DataFrame(d)
             dataframes.append(dataframe)
         self.dataframe = pd.concat(dataframes)

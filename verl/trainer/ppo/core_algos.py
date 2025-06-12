@@ -21,7 +21,7 @@ implement PPO
 import numpy as np
 import torch
 from collections import defaultdict
-
+from typing import Optional, Tuple
 import verl.utils.torch_functional as verl_F
 
 
@@ -269,14 +269,241 @@ def compute_rewards(token_level_scores, old_log_prob, ref_log_prob, kl_ratio):
     return token_level_scores - kl * kl_ratio
 
 
-def compute_policy_loss(old_log_prob,
+def _random_select(idxs: torch.Tensor, num: int) -> torch.Tensor:
+    """
+    Uniformly pick `num` elements from 1-D index tensor `idxs`.
+    Returns an empty tensor when either `num` or `idxs.numel()` is 0.
+    """
+    if num <= 0 or idxs.numel() == 0:
+        return torch.empty(0, dtype=torch.long, device=idxs.device)
+    num = min(num, idxs.numel())
+    perm = torch.randperm(idxs.numel(), device=idxs.device)
+    return idxs[perm[:num]]
+
+
+def build_top_p_mask(
+    logits: torch.Tensor,
+    labels: torch.LongTensor,
+    top_p: float
+) -> torch.BoolTensor:
+    """
+    Constructs a [B, T, V] Boolean mask that is True for those tokens which:
+      • belong to the “nucleus” (top‐p) set of new‐policy probabilities at each (b,t),
+      • except the true label at (b,t), which is forced to False.
+
+    Args:
+      logits: [B, T, V]  — the logits from the new policy at each position.
+      labels: [B, T]     — the true token‐IDs (0 <= labels[b,t] < V).
+      top_p: float in (0, 1)  — the cumulative‐probability threshold.
+
+    Returns:
+      mask: a [B, T, V] Boolean tensor where mask[b,t,i] == True iff
+            token i is in the smallest set of tokens whose sorted‐probabilities sum ≥ top_p,
+            and i != labels[b,t].
+    """
+    B, T, V = logits.shape
+
+    # 1) Compute new‐policy probabilities
+    new_log_probs = F.log_softmax(logits, dim=-1)  # [B, T, V]
+    new_probs     = torch.exp(new_log_probs)       # [B, T, V]
+
+    # 2) Sort each [B, T] slice of new_probs descending, keep indices
+    sorted_probs, sorted_indices = torch.sort(new_probs, dim=-1, descending=True)  # [B, T, V]
+    # 3) Cumulative sum over the V‐axis
+    cum_probs = torch.cumsum(sorted_probs, dim=-1)  # [B, T, V]
+    # 4) Mask all slots whose cumulative sum ≤ top_p
+    mask_cum = cum_probs <= top_p                   # [B, T, V] (bool)
+
+    # 5) We still need to include the *first* slot k* where cum_probs ≥ top_p
+    k_star = mask_cum.sum(dim=-1, keepdim=True)           # [B, T, 1], int64
+    k_star_clamped = torch.clamp(k_star, max=V-1)          # just in case top_p≥1
+    one_more_mask = torch.zeros_like(mask_cum, dtype=torch.bool)  # [B, T, V]
+
+    # 6) Scatter a True at (b, t, k_star_clamped[b,t])
+    b_idx = torch.arange(B, device=logits.device).view(B, 1).expand(B, T)  # [B, T]
+    t_idx = torch.arange(T, device=logits.device).view(1, T).expand(B, T)  # [B, T]
+    v_idx = k_star_clamped.view(B, T)                                       # [B, T]
+    one_more_mask[b_idx, t_idx, v_idx] = True
+
+    # 7) Final nucleus mask = everything with cum_probs ≤ top_p OR that one_more slot
+    top_p_mask = mask_cum | one_more_mask  # [B, T, V], bool
+
+    # 8) Build a one‐hot mask for the true labels so we can exclude them
+    true_label_mask = F.one_hot(labels, num_classes=V).bool()  # [B, T, V]
+
+    # 9) “Nucleus minus the true label”
+    final_mask = top_p_mask & (~true_label_mask)  # [B, T, V], bool
+
+    return final_mask
+
+
+def compute_policy_loss(
+    config,
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    eos_mask: torch.Tensor,
+    cliprange: Optional[float] = None,
+    cliprange_low: Optional[float] = None,
+    cliprange_high: Optional[float] = None,
+    use_token_level_loss: bool = False,
+    ref_log_prob = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    PPO/GRPO policy-gradient loss with optional covariance-based refinements.
+
+    Parameters
+    ----------
+    old_log_prob, log_prob, advantages, eos_mask : torch.Tensor
+        Same as before.
+    method : {"clip_cov", "kl_cov", None}
+        - "clip_cov": randomly DETACH a subset of tokens whose covariance lies
+          between `cov_lb` and `cov_ub`.  
+        - "kl_cov"  : add the KL penalty *only* to the `select_ratio` tokens
+          that have the largest covariance.  
+        - None      : behave exactly like vanilla PPO.
+    select_ratio : float
+        Fraction ∈ (0,1].  How many tokens to act on (relative to total #tokens).
+    cov_lb, cov_ub : float
+        Bounds used when `method=="clip_cov"`.
+    kl_coef : float
+        Multiplier for the KL penalty when `method=="kl_cov"`.
+
+    Returns
+    -------
+    pg_loss : torch.Tensor               # scalar
+    pg_clipfrac : torch.Tensor           # scalar
+    ppo_kl : torch.Tensor                # scalar
+    """
+
+    contrastive_coeff = config.get('contrastive_kl', {}).get('coef', 0.0)
+    contrastive_kl = torch.tensor(0.0, device=log_prob.device)
+    method = config.get('cov_reg', {}).get('method', None) if config.get('cov_reg', {}).get('enable', False) else None
+    if (method not in {"clip", "kl"}) and (contrastive_coeff == 0.):
+        ret = compute_policy_loss_no_cov(
+            old_log_prob,
+            log_prob,
+            advantages,
+            eos_mask,
+            cliprange=cliprange,
+            cliprange_low=cliprange_low,
+            cliprange_high=cliprange_high,
+            use_token_level_loss=use_token_level_loss,
+        )
+        assert len(ret) == 3
+        return ret[0], ret[1], ret[2], contrastive_kl
+
+    # ----------------------------------------------------------------------- #
+    # basic PPO machinery (unchanged)                                         #
+    # ----------------------------------------------------------------------- #
+    seq_len_per_sample = torch.clamp(torch.sum(eos_mask, dim=1), min=1.0)
+    negative_approx_kl = log_prob - old_log_prob          # (bs, T)
+    ratio = torch.exp(negative_approx_kl)                 # (bs, T)
+    ppo_kl = verl_F.masked_mean(-negative_approx_kl, eos_mask)
+
+    pg_losses1 = -advantages * ratio                      # (bs, T)
+
+    # choose clip ranges
+    cliprange_low = cliprange if cliprange_low is None else cliprange_low
+    cliprange_high = cliprange if cliprange_high is None else cliprange_high
+
+    pg_losses2 = -advantages * torch.clamp(
+        ratio, 1 - cliprange_low, 1 + cliprange_high
+    )
+
+    # ----------------------------------------------------------------------- #
+    # NEW: covariance between log-probs and advantages                        #
+    # ----------------------------------------------------------------------- #
+    if method in {"clip", "kl"}:
+        # (bs, T) – center each series independently to stay true to diff
+        covs = (log_prob - log_prob.mean()) * (advantages - advantages.mean())
+        total_tokens = len(pg_losses1)
+        select_num = max(int(config.cov_reg.select_ratio * total_tokens), 0)
+
+    # ----------------------------------------------------------------------- #
+    # Method-specific tweaks                                                  #
+    # ----------------------------------------------------------------------- #
+    if method == "clip":
+        # RANDOMLY DETACH tokens whose covariance magnitude lies in (cov_lb, cov_ub)
+        mask = (covs > config.cov_reg.clip_lb) & (covs < config.cov_reg.clip_ub) & eos_mask.bool()
+        candidate_idxs = mask.flatten().nonzero(as_tuple=False).squeeze(-1)
+        clip_idxs = _random_select(candidate_idxs, select_num)
+
+        if clip_idxs.numel() > 0:  # perform the in-place detaching
+            # work on flattened views so the same indices align
+            pg1_flat, pg2_flat = pg_losses1.flatten(), pg_losses2.flatten()
+            pg1_flat[clip_idxs] = pg1_flat[clip_idxs].detach()
+            pg2_flat[clip_idxs] = pg2_flat[clip_idxs].detach()
+            pg_losses1 = pg1_flat.view_as(pg_losses1)
+            pg_losses2 = pg2_flat.view_as(pg_losses2)
+
+        # standard PPO clipping after partial detaching
+        pg_losses = torch.maximum(pg_losses1, pg_losses2)
+
+    elif method == "kl":
+        # APPEND KL penalty only to the top-covariance tokens
+        kl_penalty = negative_approx_kl.abs()
+        # pick global top-k (flattened) for simplicity
+        k = min(select_num, covs.numel())
+        if k > 0:
+            topk_idx = torch.topk(covs.flatten(), k=k, largest=True).indices
+            pg1_flat = pg_losses1.flatten()
+            pg1_flat[topk_idx] += kl_penalty.flatten()[topk_idx]
+            pg_losses1 = pg1_flat.view_as(pg_losses1)
+
+        pg_losses = pg_losses1                             # no clipping here
+        pg_losses2 = None                                  # unused—but keep for clipfrac calc
+
+    else:  # vanilla PPO
+        assert method is None, method
+        pg_losses = torch.maximum(pg_losses1, pg_losses2)
+
+    if contrastive_coeff > 0:
+        assert ref_log_prob is not None, "ref_log_prob is required for contrastive loss"
+        kl = log_prob - ref_log_prob
+
+        pos_kl_mask = kl > 0
+        neg_kl_mask = kl < 0
+        correct_kl_mask = torch.logical_and(pos_kl_mask, advantages > 0)
+        incorrect_kl_mask = torch.logical_and(neg_kl_mask, advantages < 0)
+        pos_kl_penalty = torch.zeros_like(kl)
+        neg_kl_penalty = torch.zeros_like(kl)
+        pos_kl_penalty[correct_kl_mask] = kl[correct_kl_mask]
+        neg_kl_penalty[incorrect_kl_mask] = -kl[incorrect_kl_mask]
+        kl_penalty = pos_kl_penalty # + neg_kl_penalty
+        #contrastive_kl = verl_F.masked_mean(pos_kl_penalty.abs() + neg_kl_penalty.abs(), eos_mask)
+        contrastive_kl = verl_F.masked_mean(neg_kl_penalty.abs(), eos_mask)
+        pg_losses = pg_losses + (contrastive_coeff * kl_penalty)
+
+    # ----------------------------------------------------------------------- #
+    # aggregate loss & bookkeeping                                            #
+    # ----------------------------------------------------------------------- #
+    if use_token_level_loss:
+        pg_loss = verl_F.masked_mean(pg_losses, eos_mask)
+    else:
+        # sample-level average, identical to your original implementation
+        pg_loss = torch.sum(pg_losses * eos_mask, dim=1) / seq_len_per_sample
+        pg_loss = torch.mean(pg_loss)
+
+    # clipfrac (meaningful only when we *have* a clipped version)
+    if pg_losses2 is not None:
+        pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), eos_mask)
+    else:
+        pg_clipfrac = torch.tensor(0.0, device=pg_loss.device)
+
+    return pg_loss, pg_clipfrac, ppo_kl, contrastive_kl
+
+
+def compute_policy_loss_no_cov(
+                        old_log_prob,
                         log_prob,
                         advantages,
                         eos_mask,
                         cliprange=None,
                         cliprange_low=None,
                         cliprange_high=None,
-                        use_token_level_loss=False):
+                        use_token_level_loss=False,
+                        ):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1122
     Args:
         old_log_prob: `(torch.Tensor)`
