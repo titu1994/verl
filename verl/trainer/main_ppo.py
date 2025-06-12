@@ -25,7 +25,7 @@ from collections import defaultdict
 def processed_code_compute_score(data_source, solution_str, ground_truth, extra_info=None):
     # ground truth is reward_model key, correct_list is part of it
     import re
-    from nemo_skills.code_execution.math_grader import extract_answer
+    # from nemo_skills.code_execution.math_grader import extract_answer
 
     solution_strs = solution_str
     ground_truths = ground_truth
@@ -36,6 +36,7 @@ def processed_code_compute_score(data_source, solution_str, ground_truth, extra_
         non_tensor_datum = json.loads(ground_truth)
         
         if non_tensor_datum['problemtype'] == 'math':
+            assert False, 'Math problem type is not supported'
             pred = extract_answer(solution_str)
         else:
             if 'prediction' in non_tensor_datum:
