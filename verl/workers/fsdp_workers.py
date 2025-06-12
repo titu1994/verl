@@ -413,7 +413,8 @@ class ActorRolloutRefWorker(Worker):
             self.rollout, self.rollout_sharding_manager = self._build_rollout()
 
         if self._is_ref:
-            model_path = self.config.ref.model_path if self.config.ref.model_path.strip() != '' else self.config.model.path
+            ref_model_path = self.config.ref.get('model_path', '')
+            model_path = ref_model_path if ref_model_path.strip() != '' else self.config.model.path
             assert os.path.exists(model_path), f'Ref model path {model_path} does not exist'
             self.ref_module_fsdp = self._build_model_optimizer(model_path=model_path,
                                                                fsdp_config=self.config.ref.fsdp_config,
